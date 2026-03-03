@@ -246,19 +246,24 @@ print(report_text)
 # ==========================================
 if tg_bot_token and tg_chat_id:
     print("📤 Sending report to Telegram...")
+    print(f"   → chat_id: {tg_chat_id}")
     tg_url = f"https://api.telegram.org/bot{tg_bot_token}/sendMessage"
     payload = {
         "chat_id": tg_chat_id,
         "text": report_text,
-        "parse_mode": "Markdown"
+        # parse_mode removed: report contains special chars (【】, -, .) that break Telegram Markdown
     }
     try:
-        response = requests.post(tg_url, json=payload)
+        response = requests.post(tg_url, json=payload, timeout=30)
+        print(f"   → HTTP Status: {response.status_code}")
         if response.status_code == 200:
             print("✅ Telegram message sent successfully!")
         else:
-            print(f"❌ Failed to send Telegram message: {response.text}")
+            print(f"❌ Failed to send Telegram message.")
+            print(f"   Response: {response.text}")
     except Exception as e:
         print(f"❌ Exception occurred while sending Telegram message: {e}")
 else:
     print("⚠️ Telegram bot token or chat ID not set. Skipping Telegram notification.")
+    print(f"   TG_BOT_TOKEN set: {bool(tg_bot_token)}")
+    print(f"   TG_CHAT_ID set: {bool(tg_chat_id)}")
