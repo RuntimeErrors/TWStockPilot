@@ -5,20 +5,23 @@ on:
     # 09:00 UTC is 17:00 Taipei Time (Market closes at 13:30, after-market at 14:30. Data is typically ready by 17:00)
     - cron: '0 9 * * 1-5'
   workflow_dispatch: # Allow manual trigger
+  push:
+    branches:
+      - main
 
 jobs:
-  analyze_and_notify:
+  run-analysis:
     runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    strategy:
+      max-parallel: 1
 
-      - name: Set up Python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # caching pip dependencies
 
       - name: Install dependencies
         run: |
@@ -30,7 +33,5 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # You can optionally set the STOCK_ID here if you want to run for a specific stock
-          # STOCK_ID: "2344"
         run: |
           python main.py
