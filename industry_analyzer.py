@@ -261,6 +261,23 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
         gross_margin = round(gross_profit / revenue_fs * 100, 1) if gross_profit and revenue_fs else None
         op_margin    = round(op_income    / revenue_fs * 100, 1) if op_income    and revenue_fs else None
 
+        # -- margin data (融資融券) --
+        margin_5d = sr_ratio = None
+        df_margin = data.get("margin", pd.DataFrame())
+        if not df_margin.empty:
+            mb_col = next((c for c in ['MarginPurchaseTodayBalance', 'margin_purchase_today_balance']
+                           if c in df_margin.columns), None)
+            sb_col = next((c for c in ['ShortSaleTodayBalance', 'short_sale_today_balance']
+                           if c in df_margin.columns), None)
+            if mb_col:
+                mb = pd.to_numeric(df_margin[mb_col], errors='coerce').dropna()
+                if len(mb) >= 6:
+                    margin_5d = int(mb.iloc[-1] - mb.iloc[-6])
+                if sb_col and not mb.empty and float(mb.iloc[-1]) > 0:
+                    sb = pd.to_numeric(df_margin[sb_col], errors='coerce').dropna()
+                    if not sb.empty:
+                        sr_ratio = round(float(sb.iloc[-1]) / float(mb.iloc[-1]) * 100, 1)
+
         # ── 估值指標（P/E, P/B）──────────────────────────────
         df_val = data.get("valuation", pd.DataFrame())
         # FinMind valuation_indicator 欄位名稱: PER, PBR
@@ -286,6 +303,10 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
 
         # 法人面
         score += 10 if it_5d > 0 else -5
+
+        # 融資融券面
+        if margin_5d is not None and margin_5d < -1000: score -= 5
+        if sr_ratio  is not None and sr_ratio  > 20:    score -= 5
 
         # 基本面
         if rev_yoy is not None:
@@ -336,6 +357,9 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             # 估值
             "pe": _r(pe, 1) if pe is not None else None,
             "pb": _r(pb, 2) if pb is not None else None,
+            # 融資融券
+            "margin_5d": margin_5d,
+            "sr_ratio":  sr_ratio,
         })
 
     except Exception as e:
@@ -371,8 +395,10 @@ def generate_stock_text(r: dict) -> str:
         f"  布林通道：上軌 {r['bb_upper']}  下軌 {r['bb_lower']}",
         f"  近期壓力：{r['resistance'] or 'N/A'}  近期支撐：{r['support'] or 'N/A'}"
         f"  建議停損：{r['stop_loss'] or 'N/A'}（-1.5 ATR）",
-        f"  ── 籌碼面 ──",
-        f"  外資近5日：{r['fi_5d']} 張  投信近5日：{r['it_5d']} 張",
+        f"  -- chip data --",
+        f"  foreign inv 5d: {r['fi_5d']} lots  investment trust 5d: {r['it_5d']} lots",
+        f"  margin 5d chg: {(str(r['margin_5d'])+' lots') if r.get('margin_5d') is not None else 'N/A'}",
+        f"  short/margin ratio: {(str(r['sr_ratio'])+'%') if r.get('sr_ratio') is not None else 'N/A'}",
         f"  ── 基本面 ──",
         f"  EPS：{r['eps'] or 'N/A'}  毛利率：{r['gross_margin'] or 'N/A'}%  營益率：{r['op_margin'] or 'N/A'}%",
         f"  P/E：{r['pe'] or 'N/A'}  P/B：{r['pb'] or 'N/A'}",
@@ -492,6 +518,8 @@ def generate_group_html(group_name: str, results: list) -> str:
           <td style='text-align:right;'>{_na(r['pb'])}</td>
           <td style='text-align:right;'>{r['it_5d']} 張</td>
           <td style='text-align:right;'>{r['fi_5d']} 張</td>
+          <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("margin_5d") or 0) < -1000 else "color:#198754;font-weight:600;" if (r.get("margin_5d") or 0) > 0 else "")}'>{_na(r.get('margin_5d'), ' 張')}</td>
+          <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("sr_ratio") or 0) > 20 else "")}'>{_na(r.get('sr_ratio'), '%')}</td>
         </tr>"""
 
     html = f"""<!DOCTYPE html>
@@ -592,7 +620,7 @@ def generate_group_html(group_name: str, results: list) -> str:
   <th>收盤</th><th>MA20</th><th>MA60</th>
   <th>RSI</th><th>MACD</th><th>量比</th>
   <th>營收YoY</th><th>EPS</th><th>毛利率</th><th>營益率</th>
-  <th>P/E</th><th>P/B</th><th>投信5日</th><th>外資5日</th>
+  <th>P/E</th><th>P/B</th><th>投信5日</th><th>外資5日</th><th>融資增減</th><th>券資比</th>
 </tr>
 </thead>
 <tbody>
