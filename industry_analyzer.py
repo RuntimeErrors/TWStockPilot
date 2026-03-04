@@ -1,5 +1,7 @@
 import os
 import io
+import time
+import threading
 import requests
 import pandas as pd
 import numpy as np
@@ -37,6 +39,7 @@ else:
 # 2. 資料下載 helpers
 # ============================================================
 def _fetch(label: str, func, stock_id: str):
+    """FinMind 資料下載，失敗立即回傳空 DataFrame（不重試）。"""
     try:
         df = func(stock_id=stock_id, start_date=START_DATE)
         return label, df if (df is not None and not df.empty) else pd.DataFrame()
@@ -67,20 +70,39 @@ def _fetch_per(stock_id: str):
     return "valuation", pd.DataFrame()
 
 
+# ── 優化①：TDCC 全域快取（只下載一次，所有股票共用）──────────
+_tdcc_all_df: pd.DataFrame | None = None
+_tdcc_lock = threading.Lock()
+
+def _get_tdcc_all() -> pd.DataFrame:
+    """下載一次完整 TDCC CSV 並快取，後續直接從記憶體篩選。"""
+    global _tdcc_all_df
+    if _tdcc_all_df is not None:
+        return _tdcc_all_df
+    with _tdcc_lock:                       # 防止多執行緒同時下載
+        if _tdcc_all_df is not None:       # double-check after lock
+            return _tdcc_all_df
+        url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
+        try:
+            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=60)
+            if res.status_code == 200:
+                df = pd.read_csv(io.BytesIO(res.content), encoding='utf-8-sig', dtype=str)
+                df.columns = [c.strip() for c in df.columns]
+                if '證券代號' in df.columns:
+                    df['證券代號'] = df['證券代號'].str.strip()
+                    _tdcc_all_df = df
+                    print("   📦 TDCC 全量資料已快取")
+                    return _tdcc_all_df
+        except Exception as e:
+            print(f"   ⚠️  TDCC 全量下載失敗: {e}")
+        _tdcc_all_df = pd.DataFrame()     # 失敗時快取空 df 避免重試
+        return _tdcc_all_df
+
 def _fetch_tdcc(stock_id: str):
-    url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
-    try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=60)
-        if res.status_code == 200:
-            df = pd.read_csv(io.BytesIO(res.content), encoding='utf-8-sig', dtype=str)
-            df.columns = [c.strip() for c in df.columns]
-            if '證券代號' not in df.columns:
-                return "tdcc", pd.DataFrame()
-            df['證券代號'] = df['證券代號'].str.strip()
-            return "tdcc", df[df['證券代號'] == str(stock_id).strip()].copy()
-    except Exception as e:
-        print(f"   ⚠️  [{stock_id}] TDCC 下載失敗: {e}")
-    return "tdcc", pd.DataFrame()
+    df = _get_tdcc_all()
+    if df.empty or '證券代號' not in df.columns:
+        return "tdcc", pd.DataFrame()
+    return "tdcc", df[df['證券代號'] == str(stock_id).strip()].copy()
 
 
 # ============================================================
@@ -108,10 +130,20 @@ def _extract_valuation(df_val: pd.DataFrame, col: str) -> float | None:
     return float(s.iloc[-1]) if not s.empty else None
 
 
+# ── 優化②：跨族群股票結果快取（同一 stock_id 不重複下載）────────
+_stock_cache: dict = {}
+_cache_lock  = threading.Lock()
+
 # ============================================================
 # 4. 單股分析 — 資料清洗 + 技術指標 + 基本面 + 評分
 # ============================================================
 def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
+    # 命中快取則直接回傳（copy 避免外部修改快取）
+    with _cache_lock:
+        if stock_id in _stock_cache:
+            print(f"   ⚡ [{stock_id}] 快取命中，跳過重複下載")
+            return dict(_stock_cache[stock_id])
+
     result: dict = {
         "stock_id": stock_id, "stock_name": stock_name,
         "score": 50, "status": "資料不足", "error": None,
@@ -309,6 +341,9 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
     except Exception as e:
         result["error"] = str(e)
 
+    # 寫入快取
+    with _cache_lock:
+        _stock_cache[stock_id] = dict(result)
     return result
 
 
@@ -456,6 +491,7 @@ def generate_group_html(group_name: str, results: list) -> str:
           <td style='text-align:right;'>{_na(r['pe'])}</td>
           <td style='text-align:right;'>{_na(r['pb'])}</td>
           <td style='text-align:right;'>{r['it_5d']} 張</td>
+          <td style='text-align:right;'>{r['fi_5d']} 張</td>
         </tr>"""
 
     html = f"""<!DOCTYPE html>
@@ -556,7 +592,7 @@ def generate_group_html(group_name: str, results: list) -> str:
   <th>收盤</th><th>MA20</th><th>MA60</th>
   <th>RSI</th><th>MACD</th><th>量比</th>
   <th>營收YoY</th><th>EPS</th><th>毛利率</th><th>營益率</th>
-  <th>P/E</th><th>P/B</th><th>投信5日</th>
+  <th>P/E</th><th>P/B</th><th>投信5日</th><th>外資5日</th>
 </tr>
 </thead>
 <tbody>
@@ -599,10 +635,20 @@ def _tg_send(file_path: Path, caption: str, mime: str = "text/plain") -> bool:
         print(f"   ❌ Telegram 例外：{e}")
     return False
 
+def _tg_msg(text: str) -> bool:
+    """透過 Telegram sendMessage 傳送純文字訊息。"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return False
+    url  = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    try:
+        resp = requests.post(url,
+                             json={"chat_id": TG_CHAT_ID, "text": text},
+                             timeout=30)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
-# ============================================================
-# 9. 主流程
-# ============================================================
+
 def main():
     print(f"\n{'='*60}")
     print(f"  🚀 TwinStock 族群分析系統啟動")
@@ -612,13 +658,33 @@ def main():
 
     for group_name, stocks in INDUSTRY_GROUPS.items():
         print(f"\n📊 開始分析族群：【{group_name}】（共 {len(stocks)} 支）")
-        results = []
-        for sid, sname in stocks.items():
-            print(f"   🔍 {sid} {sname}...")
-            r = analyze_single_stock(sid, sname)
-            tag = f"評分:{r['score']}/100 格局:{r['status']}" if not r.get("error") else f"⚠️ {r['error']}"
-            print(f"      → {tag}")
-            results.append(r)
+        # ── 優化③：族群內個股並行分析 ───────────────────────────
+        # 有 Token 用 3 執行緒；無 Token 降為 1（序列）避免限流
+        workers = 3 if FINMIND_TOKEN else 1
+        results_map: dict = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            fut_to_sid = {
+                pool.submit(analyze_single_stock, sid, sname): sid
+                for sid, sname in stocks.items()
+            }
+            for fut in concurrent.futures.as_completed(fut_to_sid):
+                r = fut.result()
+                results_map[r['stock_id']] = r
+                if r.get("error"):
+                    err_msg = (
+                        f"⚠️ TwinStock 下載失敗\n"
+                        f"族群：{group_name}\n"
+                        f"股票：{r['stock_id']} {r['stock_name']}\n"
+                        f"錯誤：{r['error']}\n"
+                        f"時間：{TIMESTAMP_STR}"
+                    )
+                    print(f"      ⚠️  {r['stock_id']} {r['stock_name']} 失敗，已通知 TG")
+                    _tg_msg(err_msg)
+                else:
+                    print(f"      ✓ {r['stock_id']} {r['stock_name']} → 評分:{r['score']}/100 格局:{r['status']}")
+
+        # 保持 industry_groups 定義的順序
+        results = [results_map[sid] for sid in stocks if sid in results_map]
 
         safe_name = group_name.replace("/", "_").replace("\\", "_")
 
