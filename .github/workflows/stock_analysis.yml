@@ -31,9 +31,26 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Stock Analysis Script
+        if: false   # 暫停執行，需要時移除此行即可重新啟用
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           python main.py
+
+      - name: Run Industry Group Analysis
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          python industry_analyzer.py
+
+      - name: Upload Industry Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: industry-reports-${{ github.run_number }}
+          path: reports/*.txt
+          if-no-files-found: warn
