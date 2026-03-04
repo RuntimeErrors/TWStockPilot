@@ -32,18 +32,42 @@ if FINMIND_TOKEN:
 else:
     print("⚠️  未設定 FINMIND_TOKEN，使用公開額度（可能受速率限制）")
 
+
 # ============================================================
-# 2. 單股資料下載（並行用）
+# 2. 資料下載 helpers
 # ============================================================
-def _fetch(label, func, stock_id):
+def _fetch(label: str, func, stock_id: str):
     try:
         df = func(stock_id=stock_id, start_date=START_DATE)
-        return label, df if df is not None and not df.empty else pd.DataFrame()
+        return label, df if (df is not None and not df.empty) else pd.DataFrame()
     except Exception as e:
         print(f"   ⚠️  [{stock_id}] {label} 下載失敗: {e}")
         return label, pd.DataFrame()
 
-def _fetch_tdcc(stock_id):
+
+def _fetch_per(stock_id: str):
+    """直接呼叫 FinMind REST API 取得 TaiwanStockPER（P/E、P/B）。
+    SDK 目前無對應方法，故改用 HTTP。"""
+    params = {
+        "dataset": "TaiwanStockPER",
+        "data_id": stock_id,
+        "start_date": START_DATE,
+    }
+    if FINMIND_TOKEN:
+        params["token"] = FINMIND_TOKEN
+    try:
+        resp = requests.get("https://api.finmindtrade.com/api/v4/data",
+                            params=params, timeout=30)
+        if resp.status_code == 200:
+            body = resp.json()
+            if body.get("status") == 200 and body.get("data"):
+                return "valuation", pd.DataFrame(body["data"])
+    except Exception as e:
+        print(f"   ⚠️  [{stock_id}] valuation(PER) 下載失敗: {e}")
+    return "valuation", pd.DataFrame()
+
+
+def _fetch_tdcc(stock_id: str):
     url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
     try:
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=60)
@@ -58,39 +82,58 @@ def _fetch_tdcc(stock_id):
         print(f"   ⚠️  [{stock_id}] TDCC 下載失敗: {e}")
     return "tdcc", pd.DataFrame()
 
+
 # ============================================================
-# 3. 單股分析 — 資料清洗 + 技術指標 + 評分
+# 3. 基本面 helpers
+# ============================================================
+def _extract_fs_value(df_fs: pd.DataFrame, type_keywords: list) -> float | None:
+    """從 financial_statement 找符合關鍵字的最新 value（試多個關鍵字）。"""
+    if df_fs.empty or 'type' not in df_fs.columns:
+        return None
+    for kw in type_keywords:
+        mask = df_fs['type'].str.contains(kw, na=False, case=False)
+        sub = df_fs[mask]
+        if not sub.empty:
+            val = pd.to_numeric(sub['value'], errors='coerce').dropna()
+            if not val.empty:
+                return float(val.iloc[-1])
+    return None
+
+
+def _extract_valuation(df_val: pd.DataFrame, col: str) -> float | None:
+    """從 valuation_indicator 取最新一筆指定欄位。"""
+    if df_val.empty or col not in df_val.columns:
+        return None
+    s = pd.to_numeric(df_val[col], errors='coerce').dropna()
+    return float(s.iloc[-1]) if not s.empty else None
+
+
+# ============================================================
+# 4. 單股分析 — 資料清洗 + 技術指標 + 基本面 + 評分
 # ============================================================
 def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
-    """
-    下載並清洗單支股票資料，回傳結構化分析結果 dict。
-    所有數值已清洗為 Python 純量（float/int/str），適合直接寫入文字報告。
-    """
-    result = {
-        "stock_id": stock_id,
-        "stock_name": stock_name,
-        "score": 50,
-        "status": "資料不足",
-        "error": None,
+    result: dict = {
+        "stock_id": stock_id, "stock_name": stock_name,
+        "score": 50, "status": "資料不足", "error": None,
     }
-
     try:
-        # --- 並行下載 ---
-        data = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        # ── 並行下載 ──────────────────────────────────────────
+        data: dict = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as ex:
             futs = [
-                ex.submit(_fetch, "price",       api.taiwan_stock_daily,                        stock_id),
-                ex.submit(_fetch, "financial",   api.taiwan_stock_financial_statement,           stock_id),
-                ex.submit(_fetch, "revenue",     api.taiwan_stock_month_revenue,                 stock_id),
-                ex.submit(_fetch, "institutional",api.taiwan_stock_institutional_investors,      stock_id),
-                ex.submit(_fetch, "margin",      api.taiwan_stock_margin_purchase_short_sale,    stock_id),
-                ex.submit(_fetch_tdcc,           stock_id),
+                ex.submit(_fetch, "price",        api.taiwan_stock_daily,                     stock_id),
+                ex.submit(_fetch, "financial",    api.taiwan_stock_financial_statement,        stock_id),
+                ex.submit(_fetch_per,             stock_id),
+                ex.submit(_fetch, "revenue",      api.taiwan_stock_month_revenue,              stock_id),
+                ex.submit(_fetch, "institutional", api.taiwan_stock_institutional_investors,   stock_id),
+                ex.submit(_fetch, "margin",       api.taiwan_stock_margin_purchase_short_sale, stock_id),
+                ex.submit(_fetch_tdcc,            stock_id),
             ]
             for f in concurrent.futures.as_completed(futs):
                 label, df = f.result()
                 data[label] = df
 
-        # --- 價格清洗 ---
+        # ── 價格清洗 ──────────────────────────────────────────
         df_price = data.get("price", pd.DataFrame())
         if df_price.empty:
             result["error"] = "無法取得股價資料"
@@ -110,23 +153,21 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             result["error"] = "股價資料不足（< 30 筆）"
             return result
 
-        # 移動平均
-        dp['MA5']  = dp['Close'].rolling(5).mean()
-        dp['MA10'] = dp['Close'].rolling(10).mean()
-        dp['MA20'] = dp['Close'].rolling(20).mean()
-        dp['MA60'] = dp['Close'].rolling(60).mean()
-
-        # 布林通道
+        # 移動平均 & 布林
+        dp['MA5']      = dp['Close'].rolling(5).mean()
+        dp['MA10']     = dp['Close'].rolling(10).mean()
+        dp['MA20']     = dp['Close'].rolling(20).mean()
+        dp['MA60']     = dp['Close'].rolling(60).mean()
         dp['STD20']    = dp['Close'].rolling(20).std()
         dp['BB_Upper'] = dp['MA20'] + 2 * dp['STD20']
         dp['BB_Lower'] = dp['MA20'] - 2 * dp['STD20']
 
         # ATR
-        dp['H-L']  = dp['High'] - dp['Low']
-        dp['H-PC'] = abs(dp['High'] - dp['Close'].shift(1))
-        dp['L-PC'] = abs(dp['Low']  - dp['Close'].shift(1))
-        dp['TR']   = dp[['H-L','H-PC','L-PC']].max(axis=1)
-        dp['ATR14']= dp['TR'].rolling(14).mean()
+        dp['H-L']   = dp['High'] - dp['Low']
+        dp['H-PC']  = abs(dp['High'] - dp['Close'].shift(1))
+        dp['L-PC']  = abs(dp['Low']  - dp['Close'].shift(1))
+        dp['TR']    = dp[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+        dp['ATR14'] = dp['TR'].rolling(14).mean()
 
         # RSI
         delta = dp['Close'].diff()
@@ -135,39 +176,36 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
         dp['RSI14'] = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
 
         # MACD
-        dp['EMA12']      = dp['Close'].ewm(span=12, adjust=False).mean()
-        dp['EMA26']      = dp['Close'].ewm(span=26, adjust=False).mean()
-        dp['MACD']       = dp['EMA12'] - dp['EMA26']
-        dp['MACD_Signal']= dp['MACD'].ewm(span=9, adjust=False).mean()
-        dp['MACD_Hist']  = dp['MACD'] - dp['MACD_Signal']
+        dp['EMA12']       = dp['Close'].ewm(span=12, adjust=False).mean()
+        dp['EMA26']       = dp['Close'].ewm(span=26, adjust=False).mean()
+        dp['MACD']        = dp['EMA12'] - dp['EMA26']
+        dp['MACD_Signal'] = dp['MACD'].ewm(span=9, adjust=False).mean()
+        dp['MACD_Hist']   = dp['MACD'] - dp['MACD_Signal']
 
-        # 支撐 / 壓力
-        local_max = argrelextrema(dp['High'].values, np.greater_equal, order=15)[0]
-        local_min = argrelextrema(dp['Low'].values,  np.less_equal,    order=15)[0]
+        # 支撐/壓力
+        local_max   = argrelextrema(dp['High'].values, np.greater_equal, order=15)[0]
+        local_min   = argrelextrema(dp['Low'].values,  np.less_equal,    order=15)[0]
         resistances = dp['High'].iloc[local_max].tail(2).values
         supports    = dp['Low'].iloc[local_min].tail(2).values
 
         last = dp.iloc[-1]
 
-        # --- 法人清洗 ---
+        # ── 法人清洗 ──────────────────────────────────────────
+        fi_5d = it_5d = 0.0
         df_inst = data.get("institutional", pd.DataFrame())
-        inst_pivot = pd.DataFrame()
-        fi_5d = it_5d = 0
         if not df_inst.empty:
             di = df_inst.rename(columns={'date': 'Date'}).copy()
             di['Date'] = pd.to_datetime(di['Date'])
             di['net']  = pd.to_numeric(di['buy'], errors='coerce') - pd.to_numeric(di['sell'], errors='coerce')
-            inst_pivot = di.pivot_table(index='Date', columns='name', values='net', aggfunc='sum').fillna(0)
+            ip = di.pivot_table(index='Date', columns='name', values='net', aggfunc='sum').fillna(0)
             for c in ['Foreign_Investor', 'Investment_Trust']:
-                if c not in inst_pivot.columns:
-                    inst_pivot[c] = 0
-            fi_5d = float(inst_pivot['Foreign_Investor'].tail(5).sum())
-            it_5d = float(inst_pivot['Investment_Trust'].tail(5).sum())
+                if c not in ip.columns: ip[c] = 0
+            fi_5d = float(ip['Foreign_Investor'].tail(5).sum())
+            it_5d = float(ip['Investment_Trust'].tail(5).sum())
 
-        # --- 月營收清洗 ---
+        # ── 月營收清洗 ────────────────────────────────────────
+        rev_yoy = latest_rev = None
         df_rev = data.get("revenue", pd.DataFrame())
-        rev_yoy = None
-        latest_rev = None
         if not df_rev.empty:
             dr = df_rev.rename(columns={'date': 'Date', 'revenue': 'Revenue'}).copy()
             dr['Date']    = pd.to_datetime(dr['Date'])
@@ -181,77 +219,91 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
                 latest_rev = float(dr['Revenue'].iloc[-1])
                 rev_yoy    = float(dr['Revenue_YoY'].iloc[-1])
 
-        # --------------------------------------------------------
-        # 4. 多因子評分
-        # --------------------------------------------------------
+        # ── 基本面清洗（財務報表）────────────────────────────
+        df_fs = data.get("financial", pd.DataFrame())
+        eps          = _extract_fs_value(df_fs, ["EPS", "每股盈餘", "基本每股盈餘"])
+        gross_profit = _extract_fs_value(df_fs, ["GrossProfit", "毛利", "營業毛利"])
+        revenue_fs   = _extract_fs_value(df_fs, ["Revenue", "營業收入", "收入"])
+        op_income    = _extract_fs_value(df_fs, ["OperatingIncome", "營業利益", "營業淨利"])
+
+        gross_margin = round(gross_profit / revenue_fs * 100, 1) if gross_profit and revenue_fs else None
+        op_margin    = round(op_income    / revenue_fs * 100, 1) if op_income    and revenue_fs else None
+
+        # ── 估值指標（P/E, P/B）──────────────────────────────
+        df_val = data.get("valuation", pd.DataFrame())
+        # FinMind valuation_indicator 欄位名稱: PER, PBR
+        pe = _extract_valuation(df_val, "PER")
+        pb = _extract_valuation(df_val, "PBR")
+        # 若 API 無資料，以股價/EPS 自算 P/E
+        if pe is None and eps and eps != 0:
+            pe = round(float(last['Close']) / abs(eps), 1)
+
+        # ── 多因子評分 ────────────────────────────────────────
         score = 50
 
         # 技術面
-        if last['Close'] > last['MA20'] and last['MA20'] > last['MA60']:
-            score += 10
-        elif last['Close'] < last['MA20'] and last['MA20'] < last['MA60']:
-            score -= 15
+        if last['Close'] > last['MA20'] and last['MA20'] > last['MA60']: score += 10
+        elif last['Close'] < last['MA20'] and last['MA20'] < last['MA60']: score -= 15
 
-        if last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0:
-            score += 10
-        elif last['MACD_Hist'] < 0:
-            score -= 5
+        if last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0:  score += 10
+        elif last['MACD_Hist'] < 0: score -= 5
 
-        if last['Volume'] > dp['Volume'].tail(5).mean() * 1.5 and last['Close'] > last['Open']:
+        v5_mean = dp['Volume'].tail(5).mean()
+        if v5_mean > 0 and last['Volume'] > v5_mean * 1.5 and last['Close'] > last['Open']:
             score += 5
 
         # 法人面
-        if it_5d > 0:
-            score += 10
-        else:
-            score -= 5
+        score += 10 if it_5d > 0 else -5
 
         # 基本面
         if rev_yoy is not None:
-            if rev_yoy > 0:
-                score += 15
-            elif rev_yoy < 0:
-                score -= 10
+            score += 15 if rev_yoy > 0 else (-10 if rev_yoy < 0 else 0)
+        if gross_margin is not None and gross_margin > 30: score += 5
+        if op_margin    is not None and op_margin    > 10: score += 5
 
         score = max(0, min(100, score))
 
-        # --------------------------------------------------------
-        # 5. 封裝清洗後的純量結果
-        # --------------------------------------------------------
-        status_map = {
-            range(75, 101): "強勢多頭",
-            range(60, 75):  "震盪偏多",
-            range(40, 60):  "弱勢盤整",
-            range(0,  40):  "空頭啟動",
-        }
-        status = next((v for k, v in status_map.items() if score in k), "未知")
+        status_map = [
+            (75, "強勢多頭"), (60, "震盪偏多"),
+            (40, "弱勢盤整"), (0,  "空頭啟動"),
+        ]
+        status = next(v for threshold, v in status_map if score >= threshold)
+
+        # ── 封裝清洗後純量結果 ────────────────────────────────
+        def _r(v, n=2):
+            return round(float(v), n) if v is not None and not (isinstance(v, float) and np.isnan(v)) else None
 
         result.update({
-            "score": score,
-            "status": status,
-            # 價格技術
-            "close":       round(float(last['Close']),  2),
-            "ma20":        round(float(last['MA20']),   2) if not pd.isna(last['MA20'])   else None,
-            "ma60":        round(float(last['MA60']),   2) if not pd.isna(last['MA60'])   else None,
-            "rsi14":       round(float(last['RSI14']),  1) if not pd.isna(last['RSI14'])  else None,
-            "macd_hist":   round(float(last['MACD_Hist']), 3) if not pd.isna(last['MACD_Hist']) else None,
-            "atr14":       round(float(last['ATR14']),  2) if not pd.isna(last['ATR14'])  else None,
-            "bb_upper":    round(float(last['BB_Upper']),2) if not pd.isna(last['BB_Upper']) else None,
-            "bb_lower":    round(float(last['BB_Lower']),2) if not pd.isna(last['BB_Lower']) else None,
-            "volume_ratio": round(float(last['Volume']) / float(dp['Volume'].tail(5).mean()), 2)
-                            if dp['Volume'].tail(5).mean() > 0 else None,
-            "resistance":  round(float(resistances[-1]), 2) if len(resistances) > 0 else None,
-            "support":     round(float(supports[-1]),    2) if len(supports)    > 0 else None,
-            "stop_loss":   round(float(last['Close']) - 1.5 * float(last['ATR14']), 2)
-                            if not pd.isna(last['ATR14']) else None,
-            # MACD 黃金交叉
-            "macd_cross":  (last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0),
+            "score":    score,
+            "status":   status,
+            # 技術
+            "close":       _r(last['Close']),
+            "ma20":        _r(last['MA20']),
+            "ma60":        _r(last['MA60']),
+            "rsi14":       _r(last['RSI14'], 1),
+            "macd_hist":   _r(last['MACD_Hist'], 3),
+            "atr14":       _r(last['ATR14']),
+            "bb_upper":    _r(last['BB_Upper']),
+            "bb_lower":    _r(last['BB_Lower']),
+            "volume_ratio":_r(last['Volume'] / v5_mean, 2) if v5_mean > 0 else None,
+            "resistance":  _r(resistances[-1]) if len(resistances) > 0 else None,
+            "support":     _r(supports[-1])    if len(supports)    > 0 else None,
+            "stop_loss":   _r(float(last['Close']) - 1.5 * float(last['ATR14']))
+                            if _r(last['ATR14']) else None,
+            "macd_cross":  bool(last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0),
             # 法人
-            "fi_5d":       round(fi_5d / 1000, 1),   # 換算成張（千股→張）
-            "it_5d":       round(it_5d / 1000, 1),
+            "fi_5d": round(fi_5d / 1000, 1),
+            "it_5d": round(it_5d / 1000, 1),
+            # 月營收
+            "latest_rev": _r(latest_rev / 1e8, 2) if latest_rev else None,
+            "rev_yoy":    _r(rev_yoy, 1)           if rev_yoy is not None else None,
             # 基本面
-            "latest_rev":  round(latest_rev / 1e8, 2) if latest_rev else None,  # 億元
-            "rev_yoy":     round(rev_yoy, 1) if rev_yoy is not None else None,
+            "eps":          _r(eps, 2)          if eps is not None else None,
+            "gross_margin": gross_margin,
+            "op_margin":    op_margin,
+            # 估值
+            "pe": _r(pe, 1) if pe is not None else None,
+            "pb": _r(pb, 2) if pb is not None else None,
         })
 
     except Exception as e:
@@ -261,7 +313,7 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
 
 
 # ============================================================
-# 4. 單股報告文字生成
+# 5. 單股報告文字生成（AI 可讀）
 # ============================================================
 def _rsi_label(rsi):
     if rsi is None: return "N/A"
@@ -270,128 +322,286 @@ def _rsi_label(rsi):
     return f"{rsi}（中性）"
 
 def generate_stock_text(r: dict) -> str:
-    """將單股分析結果 dict 轉為 AI 可讀的純文字段落。"""
-    sid   = r['stock_id']
-    sname = r['stock_name']
-
+    sid, sname = r['stock_id'], r['stock_name']
     if r.get("error"):
         return f"[{sid} {sname}]\n  ⚠️  分析失敗：{r['error']}\n"
 
-    lines = []
-    lines.append(f"[{sid} {sname}]  評分：{r['score']}/100  格局：{r['status']}")
-    lines.append(f"  收盤價：{r['close']}  MA20：{r['ma20']}  MA60：{r['ma60']}")
-    lines.append(f"  RSI14：{_rsi_label(r['rsi14'])}")
+    lines = [
+        f"[{sid} {sname}]  評分：{r['score']}/100  格局：{r['status']}",
+        f"  ── 技術面 ──",
+        f"  收盤價：{r['close']}  MA20：{r['ma20']}  MA60：{r['ma60']}",
+        f"  RSI14：{_rsi_label(r['rsi14'])}",
+        f"  MACD：{'🔔 黃金交叉翻多' if r.get('macd_cross') else str(r['macd_hist'])}",
+        f"  量比（vs 5MA）：{r['volume_ratio']}x",
+        f"  布林通道：上軌 {r['bb_upper']}  下軌 {r['bb_lower']}",
+        f"  近期壓力：{r['resistance'] or 'N/A'}  近期支撐：{r['support'] or 'N/A'}"
+        f"  建議停損：{r['stop_loss'] or 'N/A'}（-1.5 ATR）",
+        f"  ── 籌碼面 ──",
+        f"  外資近5日：{r['fi_5d']} 張  投信近5日：{r['it_5d']} 張",
+        f"  ── 基本面 ──",
+        f"  EPS：{r['eps'] or 'N/A'}  毛利率：{r['gross_margin'] or 'N/A'}%  營益率：{r['op_margin'] or 'N/A'}%",
+        f"  P/E：{r['pe'] or 'N/A'}  P/B：{r['pb'] or 'N/A'}",
+        f"  最新月營收：{(str(r['latest_rev'])+' 億') if r['latest_rev'] else 'N/A'}"
+        f"  年增率：{(str(r['rev_yoy'])+'%') if r['rev_yoy'] is not None else 'N/A'}",
+    ]
 
-    if r.get("macd_cross"):
-        lines.append(f"  MACD：柱狀體由負轉正，出現「黃金交叉」翻多訊號🔔")
-    else:
-        lines.append(f"  MACD 柱狀體：{r['macd_hist']}")
-
-    lines.append(f"  量比（vs 5MA）：{r['volume_ratio']}x")
-    lines.append(f"  布林通道：上軌 {r['bb_upper']}  下軌 {r['bb_lower']}")
-
-    res_str = f"{r['resistance']}" if r['resistance'] else "無明顯高點"
-    sup_str = f"{r['support']}"    if r['support']    else "無明顯低點"
-    sl_str  = f"{r['stop_loss']}"  if r['stop_loss']  else "N/A"
-    lines.append(f"  近期壓力：{res_str}  近期支撐：{sup_str}  建議停損：{sl_str}（-1.5 ATR）")
-
-    lines.append(f"  外資近5日淨買超：{r['fi_5d']} 張  投信近5日淨買超：{r['it_5d']} 張")
-
-    rev_str = f"{r['latest_rev']} 億" if r['latest_rev'] else "N/A"
-    yoy_str = f"{r['rev_yoy']}%"      if r['rev_yoy'] is not None else "N/A"
-    lines.append(f"  最新月營收：{rev_str}  年增率：{yoy_str}")
-
-    # 操作建議
-    if r['status'] == "強勢多頭":
-        lines.append("  📈 建議：趨勢向上，可沿 MA5/MA10 分批佈局，跌破 MA20 停損。")
-    elif r['status'] in ("震盪偏多", "弱勢盤整"):
-        lines.append("  ⚖️  建議：方向不明，待帶量突破布林上軌後右側進場。")
-    else:
-        lines.append("  📉 建議：趨勢偏空，等待 RSI<30 且反彈跡象再短線試單。")
+    if   r['status'] == "強勢多頭": lines.append("  📈 建議：趨勢向上，沿 MA5/MA10 分批佈局，跌破 MA20 停損。")
+    elif r['status'] == "空頭啟動": lines.append("  📉 建議：趨勢偏空，等待 RSI<30 且反彈跡象再短線試單。")
+    else:                            lines.append("  ⚖️  建議：方向不明，待帶量突破布林上軌後右側進場。")
 
     return "\n".join(lines)
 
 
 # ============================================================
-# 5. 族群報告組合
+# 6. 族群 TXT 報告組合
 # ============================================================
 def generate_group_report(group_name: str, results: list) -> str:
-    """
-    將一個族群所有個股的分析結果組合成完整的 AI 可讀報告。
-    results: list of result dicts（由 analyze_single_stock 回傳）
-    """
-    lines = []
-    sep   = "=" * 50
+    sep = "=" * 55
+    lines = [sep, f"  族群分析報告：{group_name}", f"  產生時間：{TIMESTAMP_STR}", sep, ""]
 
-    lines.append(sep)
-    lines.append(f"  族群分析報告：{group_name}")
-    lines.append(f"  產生時間：{TIMESTAMP_STR}")
-    lines.append(sep)
-    lines.append("")
-
-    # 族群排行（依評分由高到低，過濾掉有 error 的）
     valid = [r for r in results if not r.get("error")]
     if valid:
         ranked = sorted(valid, key=lambda x: x['score'], reverse=True)
         lines.append("【族群評分排行】")
+        medals = ["🥇", "🥈", "🥉"]
         for i, r in enumerate(ranked, 1):
-            star = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"  {i}."
-            lines.append(f"  {star} {r['stock_id']} {r['stock_name']}  "
+            icon = medals[i-1] if i <= 3 else f"  {i}."
+            lines.append(f"  {icon} {r['stock_id']} {r['stock_name']}  "
                          f"評分：{r['score']}/100  格局：{r['status']}")
         lines.append("")
 
-        # 族群整體訊號摘要
-        avg_score  = round(sum(r['score'] for r in valid) / len(valid), 1)
-        bull_count = sum(1 for r in valid if r['status'] in ("強勢多頭", "震盪偏多"))
-        bear_count = sum(1 for r in valid if r['status'] in ("空頭啟動",))
-        lines.append("【族群整體訊號】")
-        lines.append(f"  平均評分：{avg_score}/100")
-        lines.append(f"  偏多個股：{bull_count} 支  偏空個股：{bear_count} 支  neutral：{len(valid)-bull_count-bear_count} 支")
-        lines.append("")
+        avg = round(sum(r['score'] for r in valid) / len(valid), 1)
+        bull = sum(1 for r in valid if r['status'] in ("強勢多頭", "震盪偏多"))
+        bear = sum(1 for r in valid if r['status'] == "空頭啟動")
+        lines += ["【族群整體訊號】",
+                  f"  平均評分：{avg}/100",
+                  f"  偏多：{bull} 支  偏空：{bear} 支  中性：{len(valid)-bull-bear} 支", ""]
 
-    # 各股詳細分析
-    lines.append("【個股詳細分析】")
-    lines.append("")
+    lines.append("【個股詳細分析】\n")
     for r in results:
         lines.append(generate_stock_text(r))
         lines.append("")
 
-    lines.append(sep)
-    lines.append("⚠️  本報告為量化模型輸出，僅供 AI 輔助分析參考，不構成投資建議。")
-    lines.append(sep)
-
+    lines += [sep, "⚠️  本報告為量化模型輸出，僅供 AI 輔助分析參考，不構成投資建議。", sep]
     return "\n".join(lines)
 
 
 # ============================================================
-# 6. Telegram 傳送（以檔案方式 sendDocument）
+# 7. 族群 HTML 視覺化比較表
 # ============================================================
-def send_txt_to_telegram(file_path: Path, caption: str):
+def _score_color(score) -> str:
+    if score is None: return "#6c757d"
+    if score >= 75:   return "#198754"   # green
+    if score >= 60:   return "#0d6efd"   # blue
+    if score >= 40:   return "#ffc107"   # yellow
+    return "#dc3545"                      # red
+
+def _rsi_color(rsi) -> str:
+    if rsi is None: return ""
+    if rsi > 70: return "background:#fff3cd;"  # warm
+    if rsi < 30: return "background:#cfe2ff;"  # cool
+    return ""
+
+def _yoy_color(yoy) -> str:
+    if yoy is None: return ""
+    return "color:#198754;font-weight:600;" if yoy > 0 else ("color:#dc3545;font-weight:600;" if yoy < 0 else "")
+
+def _na(v, suffix="") -> str:
+    return f"{v}{suffix}" if v is not None else "<span style='color:#aaa'>—</span>"
+
+def generate_group_html(group_name: str, results: list) -> str:
+    valid  = [r for r in results if not r.get("error")]
+    ranked = sorted(valid, key=lambda x: x['score'], reverse=True) if valid else []
+    medals = {r['stock_id']: "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else ""
+              for i, r in enumerate(ranked)}
+
+    # ── table rows ──────────────────────────────────────────
+    rows_html = ""
+    for r in results:
+        sid, sname = r['stock_id'], r['stock_name']
+        if r.get("error"):
+            rows_html += (
+                f"<tr><td><b>{sid}</b></td><td>{sname}</td>"
+                f"<td colspan='14' style='color:#dc3545;'>⚠️ {r['error']}</td></tr>\n"
+            )
+            continue
+
+        sc    = r['score']
+        sbg   = _score_color(sc)
+        medal = medals.get(sid, "")
+
+        # MACD 標示
+        macd_str = "🔔 黃金叉" if r.get('macd_cross') else _na(r['macd_hist'])
+
+        # Volume ratio badge
+        vr = r['volume_ratio']
+        vr_str = f"<span style='color:#6f42c1;font-weight:600;'>{vr}x</span>" if vr and vr >= 1.5 else _na(vr, "x")
+
+        rows_html += f"""
+        <tr>
+          <td style='font-weight:700;'>{medal} {sid}</td>
+          <td>{sname}</td>
+          <td style='background:{sbg};color:#fff;font-weight:700;text-align:center;border-radius:4px;'>{sc}</td>
+          <td style='text-align:center;'><span style='background:{sbg};color:#fff;padding:2px 6px;border-radius:10px;font-size:.8em;'>{r['status']}</span></td>
+          <td style='text-align:right;font-weight:600;'>{_na(r['close'])}</td>
+          <td style='text-align:right;'>{_na(r['ma20'])}</td>
+          <td style='text-align:right;'>{_na(r['ma60'])}</td>
+          <td style='text-align:right;{_rsi_color(r["rsi14"])}'>{_na(r['rsi14'])}</td>
+          <td style='text-align:right;'>{macd_str}</td>
+          <td style='text-align:right;'>{vr_str}</td>
+          <td style='text-align:right;{_yoy_color(r["rev_yoy"])}'>{_na(r['rev_yoy'], '%')}</td>
+          <td style='text-align:right;'>{_na(r['eps'])}</td>
+          <td style='text-align:right;'>{_na(r['gross_margin'], '%')}</td>
+          <td style='text-align:right;'>{_na(r['op_margin'], '%')}</td>
+          <td style='text-align:right;'>{_na(r['pe'])}</td>
+          <td style='text-align:right;'>{_na(r['pb'])}</td>
+          <td style='text-align:right;'>{r['it_5d']} 張</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>{group_name} 族群分析 {TODAY_STR}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: 'Segoe UI', 'PingFang TC', sans-serif;
+    background: #0f1117;
+    color: #e4e6ea;
+    padding: 24px;
+    font-size: 14px;
+  }}
+  h1 {{
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+    background: linear-gradient(90deg, #4fc3f7, #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }}
+  .meta {{ color: #9ca3af; font-size: .85rem; margin-bottom: 20px; }}
+  .summary-row {{ display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }}
+  .card {{
+    background: #1e2130;
+    border-radius: 10px;
+    padding: 14px 20px;
+    min-width: 130px;
+    text-align: center;
+    border: 1px solid #2d3250;
+  }}
+  .card .val {{ font-size: 1.6rem; font-weight: 700; }}
+  .card .lbl {{ color: #9ca3af; font-size: .78rem; margin-top: 2px; }}
+  .green {{ color: #34d399; }} .blue {{ color: #60a5fa; }}
+  .yellow {{ color: #fbbf24; }} .red {{ color: #f87171; }}
+  .table-wrap {{ overflow-x: auto; border-radius: 10px; background: #1e2130; border: 1px solid #2d3250; }}
+  table {{ border-collapse: collapse; width: 100%; white-space: nowrap; }}
+  th {{
+    background: #262b40;
+    color: #9ca3af;
+    font-weight: 600;
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    padding: 10px 12px;
+    border-bottom: 1px solid #2d3250;
+    text-align: left;
+  }}
+  td {{
+    padding: 9px 12px;
+    border-bottom: 1px solid #1a1d2e;
+    vertical-align: middle;
+    font-size: .88rem;
+  }}
+  tr:last-child td {{ border-bottom: none; }}
+  tr:hover td {{ background: #252b3d; }}
+  .legend {{
+    margin-top: 18px;
+    font-size: .8rem;
+    color: #6b7280;
+    display: flex; gap: 20px; flex-wrap: wrap;
+  }}
+  .legend span {{ display: flex; align-items: center; gap: 6px; }}
+  .dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; }}
+</style>
+</head>
+<body>
+<h1>📊 {group_name} 族群分析報告</h1>
+<div class="meta">產生時間：{TIMESTAMP_STR} &nbsp;|&nbsp; 資料來源：FinMind / TDCC</div>
+"""
+
+    # 統計摘要卡片
+    if valid:
+        avg_sc = round(sum(r['score'] for r in valid) / len(valid), 1)
+        bull   = sum(1 for r in valid if r['status'] in ("強勢多頭", "震盪偏多"))
+        bear   = sum(1 for r in valid if r['status'] == "空頭啟動")
+        top    = ranked[0] if ranked else None
+        top_str= f"{top['stock_id']} {top['stock_name']} ({top['score']})" if top else "—"
+        avg_cls = "green" if avg_sc >= 65 else ("yellow" if avg_sc >= 50 else "red")
+        html += f"""<div class="summary-row">
+  <div class="card"><div class="val {avg_cls}">{avg_sc}</div><div class="lbl">族群平均評分</div></div>
+  <div class="card"><div class="val green">{bull}</div><div class="lbl">偏多個股</div></div>
+  <div class="card"><div class="val red">{bear}</div><div class="lbl">偏空個股</div></div>
+  <div class="card"><div class="val blue">{len(valid)-bull-bear}</div><div class="lbl">中性個股</div></div>
+  <div class="card" style="min-width:200px"><div class="val green" style="font-size:1rem;">{top_str}</div><div class="lbl">族群領頭羊</div></div>
+</div>"""
+
+    # 比較表
+    html += f"""<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>代號</th><th>名稱</th>
+  <th>評分</th><th>格局</th>
+  <th>收盤</th><th>MA20</th><th>MA60</th>
+  <th>RSI</th><th>MACD</th><th>量比</th>
+  <th>營收YoY</th><th>EPS</th><th>毛利率</th><th>營益率</th>
+  <th>P/E</th><th>P/B</th><th>投信5日</th>
+</tr>
+</thead>
+<tbody>
+{rows_html}
+</tbody>
+</table>
+</div>
+<div class="legend">
+  <span><span class="dot" style="background:#198754"></span>強勢多頭 (≥75)</span>
+  <span><span class="dot" style="background:#0d6efd"></span>震盪偏多 (60~74)</span>
+  <span><span class="dot" style="background:#ffc107"></span>弱勢盤整 (40~59)</span>
+  <span><span class="dot" style="background:#dc3545"></span>空頭啟動 (&lt;40)</span>
+  <span>🟡 RSI&gt;70 注意過熱 &nbsp; 🔵 RSI&lt;30 超賣zone</span>
+</div>
+<p style="margin-top:16px;color:#4b5563;font-size:.78rem;">⚠️ 本報告為量化模型輸出，僅供 AI 輔助分析參考，不構成投資建議。</p>
+</body>
+</html>"""
+    return html
+
+
+# ============================================================
+# 8. Telegram 傳送（sendDocument）
+# ============================================================
+def _tg_send(file_path: Path, caption: str, mime: str = "text/plain") -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("   ⚠️  未設定 Telegram 環境變數，跳過傳送。")
         return False
-
-    url     = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendDocument"
-    payload = {"chat_id": TG_CHAT_ID, "caption": caption}
-
+    url  = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendDocument"
+    data = {"chat_id": TG_CHAT_ID, "caption": caption}
     try:
         with open(file_path, "rb") as f:
-            resp = requests.post(url, data=payload,
-                                 files={"document": (file_path.name, f, "text/plain")},
+            resp = requests.post(url, data=data,
+                                 files={"document": (file_path.name, f, mime)},
                                  timeout=60)
         if resp.status_code == 200:
             print(f"   📤 Telegram 傳送成功：{file_path.name}")
             return True
-        else:
-            print(f"   ❌ Telegram 傳送失敗 [{resp.status_code}]：{resp.text[:200]}")
-            return False
+        print(f"   ❌ Telegram 失敗 [{resp.status_code}]：{resp.text[:200]}")
     except Exception as e:
-        print(f"   ❌ Telegram 傳送例外：{e}")
-        return False
+        print(f"   ❌ Telegram 例外：{e}")
+    return False
 
 
 # ============================================================
-# 7. 主流程
+# 9. 主流程
 # ============================================================
 def main():
     print(f"\n{'='*60}")
@@ -400,37 +610,29 @@ def main():
     print(f"  分析族群數：{len(INDUSTRY_GROUPS)}")
     print(f"{'='*60}\n")
 
-    group_names = list(INDUSTRY_GROUPS.keys())
-
-    for group_name in group_names:
-        stocks = INDUSTRY_GROUPS[group_name]
-        count  = len(stocks)
-        print(f"\n📊 開始分析族群：【{group_name}】（共 {count} 支）")
-
+    for group_name, stocks in INDUSTRY_GROUPS.items():
+        print(f"\n📊 開始分析族群：【{group_name}】（共 {len(stocks)} 支）")
         results = []
-
-        # 族群內各股序列分析（避免 FinMind 頻繁並行觸發速率限制）
         for sid, sname in stocks.items():
-            print(f"   🔍 分析 {sid} {sname}...")
+            print(f"   🔍 {sid} {sname}...")
             r = analyze_single_stock(sid, sname)
-            if r.get("error"):
-                print(f"      ⚠️  結果：{r['error']}")
-            else:
-                print(f"      ✅ 評分：{r['score']}/100  格局：{r['status']}")
+            tag = f"評分:{r['score']}/100 格局:{r['status']}" if not r.get("error") else f"⚠️ {r['error']}"
+            print(f"      → {tag}")
             results.append(r)
 
-        # 組合族群報告
-        report_text = generate_group_report(group_name, results)
+        safe_name = group_name.replace("/", "_").replace("\\", "_")
 
-        # 儲存 txt 檔（族群名_日期.txt）
-        safe_name   = group_name.replace("/", "_").replace("\\", "_")
-        txt_path    = REPORT_DIR / f"{safe_name}_{TODAY_STR}.txt"
-        txt_path.write_text(report_text, encoding="utf-8-sig")
-        print(f"   💾 報告已儲存：{txt_path}")
+        # ── TXT 報告 ──────────────────────────────────────────
+        txt_path = REPORT_DIR / f"{safe_name}_{TODAY_STR}.txt"
+        txt_path.write_text(generate_group_report(group_name, results), encoding="utf-8-sig")
+        print(f"   💾 TXT 儲存：{txt_path}")
+        _tg_send(txt_path, f"📄 【{group_name}】AI 分析原文 {TIMESTAMP_STR}")
 
-        # 傳送至 Telegram
-        caption = f"📊 【{group_name}】族群分析報告 {TIMESTAMP_STR}"
-        send_txt_to_telegram(txt_path, caption)
+        # ── HTML 視覺化報告 ───────────────────────────────────
+        html_path = REPORT_DIR / f"{safe_name}_{TODAY_STR}.html"
+        html_path.write_text(generate_group_html(group_name, results), encoding="utf-8")
+        print(f"   🌐 HTML 儲存：{html_path}")
+        _tg_send(html_path, f"📊 【{group_name}】視覺化比較表 {TIMESTAMP_STR}", mime="text/html")
 
     print(f"\n{'='*60}")
     print(f"  ✅ 所有族群分析完成！")
