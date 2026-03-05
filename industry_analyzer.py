@@ -287,6 +287,29 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
         if pe is None and eps and eps != 0:
             pe = round(float(last['Close']) / abs(eps), 1)
 
+        # ── TDCC 籌碼清洗（千張大戶持股比例與日期）──────────────
+        tdcc_1k_ratio = None
+        tdcc_date = None
+        df_tdcc = data.get("tdcc", pd.DataFrame())
+        if df_tdcc is None or not isinstance(df_tdcc, pd.DataFrame):
+            df_tdcc = pd.DataFrame()
+
+        # 動態尋找比例與日期欄位
+        ratio_col = next((c for c in ['占總計比例', '占集保庫存數比例%', '比例'] if c in df_tdcc.columns), None)
+        date_col = next((c for c in ['資料日期', '日期', 'Date'] if c in df_tdcc.columns), None)
+
+        if not df_tdcc.empty and '持股分級' in df_tdcc.columns and ratio_col:
+            # 持股分級 15 通常代表 1,000,000 股（1,000張）以上
+            df_tdcc['持股分級'] = pd.to_numeric(df_tdcc['持股分級'], errors='coerce')
+            df_tdcc[ratio_col] = pd.to_numeric(df_tdcc[ratio_col], errors='coerce')
+            # 取出分級 15（千張大戶）的資料
+            df_1k = df_tdcc[df_tdcc['持股分級'] == 15]
+            if not df_1k.empty:
+                # TDCC 開放資料通常只有最新一週，直接取最新一筆
+                tdcc_1k_ratio = float(df_1k[ratio_col].iloc[-1])
+                if date_col:
+                    tdcc_date = str(df_1k[date_col].iloc[-1])
+
         # ── 多因子評分 ────────────────────────────────────────
         score = 50
 
@@ -307,6 +330,12 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
         # 融資融券面
         if margin_5d is not None and margin_5d < -1000: score -= 5
         if sr_ratio  is not None and sr_ratio  > 20:    score -= 5
+
+        # 籌碼面 (TDCC 千張大戶)
+        if tdcc_1k_ratio is not None:
+            if tdcc_1k_ratio >= 60: score += 10    # 籌碼非常集中
+            elif tdcc_1k_ratio >= 40: score += 5     # 籌碼偏集中
+            elif tdcc_1k_ratio < 20: score -= 5      # 籌碼渙散
 
         # 基本面
         if rev_yoy is not None:
@@ -360,6 +389,9 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             # 融資融券
             "margin_5d": margin_5d,
             "sr_ratio":  sr_ratio,
+            # TDCC 籌碼
+            "tdcc_1k_ratio": _r(tdcc_1k_ratio, 2),
+            "tdcc_date": tdcc_date,
         })
 
     except Exception as e:
@@ -404,6 +436,8 @@ def generate_stock_text(r: dict) -> str:
         f"  P/E：{r['pe'] or 'N/A'}  P/B：{r['pb'] or 'N/A'}",
         f"  最新月營收：{(str(r['latest_rev'])+' 億') if r['latest_rev'] else 'N/A'}"
         f"  年增率：{(str(r['rev_yoy'])+'%') if r['rev_yoy'] is not None else 'N/A'}",
+        f"  ── 籌碼集中度 ──",
+        f"  千張大戶持股比例：{(str(r['tdcc_1k_ratio'])+'%') if r.get('tdcc_1k_ratio') is not None else 'N/A'} " + (f"(資料日期: {r['tdcc_date']})" if r.get('tdcc_date') else ""),
     ]
 
     if   r['status'] == "強勢多頭": lines.append("  📈 建議：趨勢向上，沿 MA5/MA10 分批佈局，跌破 MA20 停損。")
@@ -497,6 +531,11 @@ def generate_group_html(group_name: str, results: list) -> str:
         # Volume ratio badge
         vr = r['volume_ratio']
         vr_str = f"<span style='color:#6f42c1;font-weight:600;'>{vr}x</span>" if vr and vr >= 1.5 else _na(vr, "x")
+        
+        # TDCC data
+        tdcc_1k_html = _na(r.get('tdcc_1k_ratio'), '%')
+        if r.get('tdcc_date'):
+            tdcc_1k_html += f"<br><span style='font-size:0.75em;color:#cfcfcf;font-weight:normal;'>{r['tdcc_date']}</span>"
 
         rows_html += f"""
         <tr>
@@ -520,6 +559,7 @@ def generate_group_html(group_name: str, results: list) -> str:
           <td style='text-align:right;'>{r['fi_5d']} 張</td>
           <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("margin_5d") or 0) < -1000 else "color:#198754;font-weight:600;" if (r.get("margin_5d") or 0) > 0 else "")}'>{_na(r.get('margin_5d'), ' 張')}</td>
           <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("sr_ratio") or 0) > 20 else "")}'>{_na(r.get('sr_ratio'), '%')}</td>
+          <td style='text-align:right;{("color:#198754;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) >= 60 else "color:#dc3545;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) < 20 else "")}'>{tdcc_1k_html}</td>
         </tr>"""
 
     html = f"""<!DOCTYPE html>
@@ -620,7 +660,7 @@ def generate_group_html(group_name: str, results: list) -> str:
   <th>收盤</th><th>MA20</th><th>MA60</th>
   <th>RSI</th><th>MACD</th><th>量比</th>
   <th>營收YoY</th><th>EPS</th><th>毛利率</th><th>營益率</th>
-  <th>P/E</th><th>P/B</th><th>投信5日</th><th>外資5日</th><th>融資增減</th><th>券資比</th>
+  <th>P/E</th><th>P/B</th><th>投信5日</th><th>外資5日</th><th>融資增減</th><th>券資比</th><th>千張大戶</th>
 </tr>
 </thead>
 <tbody>
