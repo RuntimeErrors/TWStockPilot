@@ -20,12 +20,17 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 TG_BOT_TOKEN  = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID    = os.getenv("TG_CHAT_ID")
 
-START_DATE    = (datetime.datetime.now() - datetime.timedelta(days=3 * 365)).strftime("%Y-%m-%d")
+import json as _json
+
+TW_TZ         = datetime.timezone(datetime.timedelta(hours=8))
+START_DATE    = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=3 * 365)).strftime("%Y-%m-%d")
 REPORT_DIR    = Path("reports")
 REPORT_DIR.mkdir(exist_ok=True)
+CACHE_DIR     = Path("cache")
+CACHE_DIR.mkdir(exist_ok=True)
 
-TODAY_STR     = datetime.datetime.now().strftime("%Y%m%d")
-TIMESTAMP_STR = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+TODAY_STR     = datetime.datetime.now(TW_TZ).strftime("%Y%m%d")
+TIMESTAMP_STR = datetime.datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M (UTC+8)")
 
 api = DataLoader()
 if FINMIND_TOKEN:
@@ -134,15 +139,45 @@ def _extract_valuation(df_val: pd.DataFrame, col: str) -> float | None:
 _stock_cache: dict = {}
 _cache_lock  = threading.Lock()
 
+
+def _disk_cache_load(stock_id: str) -> dict | None:
+    """讀取當日磁碟快取；若沒有則回傳 None。"""
+    path = CACHE_DIR / f"{stock_id}_{TODAY_STR}.json"
+    if path.exists():
+        try:
+            return _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
+
+
+def _disk_cache_save(stock_id: str, result: dict):
+    """將分析結果寫入磁碟（price_history 直接可序列化）。"""
+    path = CACHE_DIR / f"{stock_id}_{TODAY_STR}.json"
+    try:
+        path.write_text(_json.dumps(result, ensure_ascii=False, default=str),
+                        encoding="utf-8")
+    except Exception as e:
+        print(f"   ⚠️  [{stock_id}] 磁碟快取寫入失敗: {e}")
+
 # ============================================================
 # 4. 單股分析 — 資料清洗 + 技術指標 + 基本面 + 評分
 # ============================================================
 def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
-    # 命中快取則直接回傳（copy 避免外部修改快取）
+    # 1. 記憶體快取（同一與行程內）
     with _cache_lock:
         if stock_id in _stock_cache:
-            print(f"   ⚡ [{stock_id}] 快取命中，跳過重複下載")
+            print(f"   ⚡ [{stock_id}] 記憶體快取命中，跳過重複下載")
             return dict(_stock_cache[stock_id])
+
+    # 2. 磁碟快取（同日不重複下載）
+    disk = _disk_cache_load(stock_id)
+    if disk is not None:
+        print(f"   💾 [{stock_id}] 磁碟快取命中（{TODAY_STR}），跳過下載")
+        disk.setdefault("stock_name", stock_name)
+        with _cache_lock:
+            _stock_cache[stock_id] = disk
+        return dict(disk)
 
     result: dict = {
         "stock_id": stock_id, "stock_name": stock_name,
@@ -355,6 +390,30 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
         def _r(v, n=2):
             return round(float(v), n) if v is not None and not (isinstance(v, float) and np.isnan(v)) else None
 
+        # ── 歷史價格序列（供 HTML 走勢圖使用，最近 180 筆）────
+        hist_cols = ['Open', 'High', 'Low', 'Close', 'Volume',
+                     'MA5', 'MA10', 'MA20', 'MA60', 'BB_Upper', 'BB_Lower']
+        dp_hist = dp[hist_cols].tail(180).copy()
+        # 把 NaN 換成 None，以便 JSON 序列化
+        dp_hist = dp_hist.where(dp_hist.notna(), other=None)
+        price_history = [
+            {
+                "date":     idx.strftime("%Y-%m-%d"),
+                "open":     round(float(row['Open']),  2) if row['Open']     is not None else None,
+                "high":     round(float(row['High']),  2) if row['High']     is not None else None,
+                "low":      round(float(row['Low']),   2) if row['Low']      is not None else None,
+                "close":    round(float(row['Close']), 2) if row['Close']    is not None else None,
+                "volume":   int(row['Volume'])              if row['Volume']   is not None else None,
+                "ma5":      round(float(row['MA5']),   2) if row['MA5']      is not None else None,
+                "ma10":     round(float(row['MA10']),  2) if row['MA10']     is not None else None,
+                "ma20":     round(float(row['MA20']),  2) if row['MA20']     is not None else None,
+                "ma60":     round(float(row['MA60']),  2) if row['MA60']     is not None else None,
+                "bb_upper": round(float(row['BB_Upper']), 2) if row['BB_Upper'] is not None else None,
+                "bb_lower": round(float(row['BB_Lower']), 2) if row['BB_Lower'] is not None else None,
+            }
+            for idx, row in dp_hist.iterrows()
+        ]
+
         result.update({
             "score":    score,
             "status":   status,
@@ -392,14 +451,18 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             # TDCC 籌碼
             "tdcc_1k_ratio": _r(tdcc_1k_ratio, 2),
             "tdcc_date": tdcc_date,
+            # 歷史走勢序列
+            "price_history": price_history,
         })
 
     except Exception as e:
         result["error"] = str(e)
 
-    # 寫入快取
+    # 寫入記憶體 + 磁碟快取
     with _cache_lock:
         _stock_cache[stock_id] = dict(result)
+    if not result.get("error"):
+        _disk_cache_save(stock_id, result)
     return result
 
 
@@ -482,19 +545,21 @@ def generate_group_report(group_name: str, results: list) -> str:
 
 
 # ============================================================
-# 7. 族群 HTML 視覺化比較表
+# 7. 族群 HTML 視覺化比較表（含走勢圖）
 # ============================================================
+import json as _json
+
 def _score_color(score) -> str:
     if score is None: return "#6c757d"
-    if score >= 75:   return "#198754"   # green
-    if score >= 60:   return "#0d6efd"   # blue
-    if score >= 40:   return "#ffc107"   # yellow
-    return "#dc3545"                      # red
+    if score >= 75:   return "#198754"
+    if score >= 60:   return "#0d6efd"
+    if score >= 40:   return "#ffc107"
+    return "#dc3545"
 
 def _rsi_color(rsi) -> str:
     if rsi is None: return ""
-    if rsi > 70: return "background:#fff3cd;"  # warm
-    if rsi < 30: return "background:#cfe2ff;"  # cool
+    if rsi > 70: return "background:#fff3cd;"
+    if rsi < 30: return "background:#cfe2ff;"
     return ""
 
 def _yoy_color(yoy) -> str:
@@ -510,14 +575,18 @@ def generate_group_html(group_name: str, results: list) -> str:
     medals = {r['stock_id']: "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else ""
               for i, r in enumerate(ranked)}
 
-    # ── table rows ──────────────────────────────────────────
+    # ── table rows + chart sections ─────────────────────────
     rows_html = ""
+    charts_html = ""
     for r in results:
         sid, sname = r['stock_id'], r['stock_name']
+        chart_row_id = f"chart-row-{sid}"
+        chart_div_id = f"chart-{sid}"
+
         if r.get("error"):
             rows_html += (
                 f"<tr><td><b>{sid}</b></td><td>{sname}</td>"
-                f"<td colspan='14' style='color:#dc3545;'>⚠️ {r['error']}</td></tr>\n"
+                f"<td colspan='22' style='color:#dc3545;'>⚠️ {r['error']}</td></tr>\n"
             )
             continue
 
@@ -525,21 +594,17 @@ def generate_group_html(group_name: str, results: list) -> str:
         sbg   = _score_color(sc)
         medal = medals.get(sid, "")
 
-        # MACD 標示
         macd_str = "🔔 黃金叉" if r.get('macd_cross') else _na(r['macd_hist'])
-
-        # Volume ratio badge
         vr = r['volume_ratio']
         vr_str = f"<span style='color:#6f42c1;font-weight:600;'>{vr}x</span>" if vr and vr >= 1.5 else _na(vr, "x")
-        
-        # TDCC data
+
         tdcc_1k_html = _na(r.get('tdcc_1k_ratio'), '%')
         if r.get('tdcc_date'):
             tdcc_1k_html += f"<br><span style='font-size:0.75em;color:#cfcfcf;font-weight:normal;'>{r['tdcc_date']}</span>"
 
         rows_html += f"""
-        <tr>
-          <td style='font-weight:700;'>{medal} {sid}</td>
+        <tr class='data-row' onclick="toggleChart('{sid}')" style='cursor:pointer;'>
+          <td style='font-weight:700;'>{medal} {sid} <span style='font-size:.75em;color:#60a5fa;'>▼</span></td>
           <td>{sname}</td>
           <td style='background:{sbg};color:#fff;font-weight:700;text-align:center;border-radius:4px;'>{sc}</td>
           <td style='text-align:center;'><span style='background:{sbg};color:#fff;padding:2px 6px;border-radius:10px;font-size:.8em;'>{r['status']}</span></td>
@@ -560,13 +625,33 @@ def generate_group_html(group_name: str, results: list) -> str:
           <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("margin_5d") or 0) < -1000 else "color:#198754;font-weight:600;" if (r.get("margin_5d") or 0) > 0 else "")}'>{_na(r.get('margin_5d'), ' 張')}</td>
           <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("sr_ratio") or 0) > 20 else "")}'>{_na(r.get('sr_ratio'), '%')}</td>
           <td style='text-align:right;{("color:#198754;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) >= 60 else "color:#dc3545;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) < 20 else "")}'>{tdcc_1k_html}</td>
+        </tr>
+        <tr id='{chart_row_id}' style='display:none;'>
+          <td colspan='21' style='padding:0;background:#131722;'>
+            <div id='{chart_div_id}' style='height:480px;'></div>
+          </td>
         </tr>"""
 
+        # 序列化歷史資料並產生 Plotly 初始化 JS
+        hist = r.get('price_history', [])
+        hist_json = _json.dumps(hist, ensure_ascii=False)
+        charts_html += f"""
+    chartData['{sid}'] = {hist_json};"""
+
+    # ── HTML skeleton ────────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
 <title>{group_name} 族群分析 {TODAY_STR}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>
+  // 若官方 CDN 載入失敗，自動改用 jsDelivr 鏡像
+  if (typeof Plotly === 'undefined') {{
+    document.write('<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2.35.2/plotly.min.js"><\/script>');
+  }}
+</script>
+<noscript><p style="color:#f87171;text-align:center;padding:20px;">⚠️ 請在支援 JavaScript 的瀏覽器中開啟此報告以查看互動圖表。</p></noscript>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
@@ -617,8 +702,7 @@ def generate_group_html(group_name: str, results: list) -> str:
     vertical-align: middle;
     font-size: .88rem;
   }}
-  tr:last-child td {{ border-bottom: none; }}
-  tr:hover td {{ background: #252b3d; }}
+  tr.data-row:hover td {{ background: #1e2a45; }}
   .legend {{
     margin-top: 18px;
     font-size: .8rem;
@@ -631,10 +715,9 @@ def generate_group_html(group_name: str, results: list) -> str:
 </head>
 <body>
 <h1>📊 {group_name} 族群分析報告</h1>
-<div class="meta">產生時間：{TIMESTAMP_STR} &nbsp;|&nbsp; 資料來源：FinMind / TDCC</div>
+<div class="meta">產生時間：{TIMESTAMP_STR} &nbsp;|&nbsp; 資料來源：FinMind / TDCC &nbsp;|&nbsp; 點擊任意列展開走勢圖</div>
 """
 
-    # 統計摘要卡片
     if valid:
         avg_sc = round(sum(r['score'] for r in valid) / len(valid), 1)
         bull   = sum(1 for r in valid if r['status'] in ("強勢多頭", "震盪偏多"))
@@ -650,7 +733,6 @@ def generate_group_html(group_name: str, results: list) -> str:
   <div class="card" style="min-width:200px"><div class="val green" style="font-size:1rem;">{top_str}</div><div class="lbl">族群領頭羊</div></div>
 </div>"""
 
-    # 比較表
     html += f"""<div class="table-wrap">
 <table>
 <thead>
@@ -676,6 +758,133 @@ def generate_group_html(group_name: str, results: list) -> str:
   <span>🟡 RSI&gt;70 注意過熱 &nbsp; 🔵 RSI&lt;30 超賣zone</span>
 </div>
 <p style="margin-top:16px;color:#4b5563;font-size:.78rem;">⚠️ 本報告為量化模型輸出，僅供 AI 輔助分析參考，不構成投資建議。</p>
+
+<script>
+// ── 歷史資料全域快取 ────────────────────────────────────────────
+const chartData = {{}};
+const rendered  = new Set();
+{charts_html}
+
+// ── 切換走勢圖顯示 ──────────────────────────────────────────────
+function toggleChart(sid) {{
+  const row = document.getElementById('chart-row-' + sid);
+  if (!row) return;
+  const visible = row.style.display !== 'none';
+  row.style.display = visible ? 'none' : 'table-row';
+  if (!visible && !rendered.has(sid)) {{
+    rendered.add(sid);
+    renderChart(sid);
+  }}
+}}
+
+// ── 繪製 Plotly 走勢圖 ──────────────────────────────────────────
+function renderChart(sid) {{
+  const data = chartData[sid] || [];
+  if (!data.length) return;
+
+  const dates    = data.map(d => d.date);
+  const opens    = data.map(d => d.open);
+  const highs    = data.map(d => d.high);
+  const lows     = data.map(d => d.low);
+  const closes   = data.map(d => d.close);
+  const volumes  = data.map(d => d.volume);
+  const ma5      = data.map(d => d.ma5);
+  const ma10     = data.map(d => d.ma10);
+  const ma20     = data.map(d => d.ma20);
+  const ma60     = data.map(d => d.ma60);
+  const bbUpper  = data.map(d => d.bb_upper);
+  const bbLower  = data.map(d => d.bb_lower);
+
+  const candlestick = {{
+    type: 'candlestick',
+    x: dates, open: opens, high: highs, low: lows, close: closes,
+    name: sid,
+    increasing: {{ line: {{ color: '#ef5350' }}, fillcolor: '#ef5350' }},
+    decreasing: {{ line: {{ color: '#26a69a' }}, fillcolor: '#26a69a' }},
+    xaxis: 'x', yaxis: 'y',
+    hoverinfo: 'x+y',
+  }};
+
+  const makeLine = (yArr, name, color, dash='solid', width=1.5) => ({{
+    type: 'scatter', mode: 'lines',
+    x: dates, y: yArr, name,
+    line: {{ color, width, dash }},
+    xaxis: 'x', yaxis: 'y',
+    hoverinfo: 'x+y+name',
+  }});
+
+  // 布林帶填色
+  const bbFill = {{
+    type: 'scatter', mode: 'lines',
+    x: [...dates, ...dates.slice().reverse()],
+    y: [...bbUpper, ...bbLower.slice().reverse()],
+    fill: 'toself',
+    fillcolor: 'rgba(167,139,250,0.08)',
+    line: {{ width: 0 }},
+    name: 'BB Band',
+    showlegend: false,
+    xaxis: 'x', yaxis: 'y',
+    hoverinfo: 'skip',
+  }};
+
+  const volColors = data.map((d,i) => (i === 0 || d.close >= d.open) ? 'rgba(239,83,80,0.6)' : 'rgba(38,166,154,0.6)');
+  const volBar = {{
+    type: 'bar',
+    x: dates, y: volumes,
+    name: '成交量',
+    marker: {{ color: volColors }},
+    xaxis: 'x', yaxis: 'y2',
+    hoverinfo: 'x+y',
+  }};
+
+  const traces = [
+    bbFill,
+    makeLine(bbUpper, 'BB Upper', '#a78bfa', 'dot', 1),
+    makeLine(bbLower, 'BB Lower', '#a78bfa', 'dot', 1),
+    makeLine(ma5,  'MA5',  '#f59e0b', 'solid', 1.2),
+    makeLine(ma10, 'MA10', '#fb923c', 'solid', 1.2),
+    makeLine(ma20, 'MA20', '#34d399', 'solid', 1.5),
+    makeLine(ma60, 'MA60', '#60a5fa', 'solid', 1.8),
+    candlestick,
+    volBar,
+  ];
+
+  const layout = {{
+    paper_bgcolor: '#131722',
+    plot_bgcolor:  '#131722',
+    font: {{ color: '#9ca3af', size: 11 }},
+    margin: {{ l: 55, r: 20, t: 30, b: 30 }},
+    showlegend: true,
+    legend: {{ orientation: 'h', y: 1.05, x: 0, font: {{ size: 11 }}, bgcolor: 'rgba(0,0,0,0)' }},
+    xaxis: {{
+      type: 'category',
+      rangeslider: {{ visible: false }},
+      showgrid: true, gridcolor: '#1e2130',
+      tickangle: -30,
+      nticks: 12,
+    }},
+    yaxis: {{
+      domain: [0.28, 1],
+      showgrid: true, gridcolor: '#1e2130',
+      title: {{ text: '價格', font: {{ size: 11 }} }},
+      side: 'right',
+    }},
+    yaxis2: {{
+      domain: [0, 0.22],
+      showgrid: false,
+      title: {{ text: '成交量', font: {{ size: 10 }} }},
+      side: 'right',
+    }},
+  }};
+
+  Plotly.newPlot('chart-' + sid, traces, layout, {{
+    responsive: true,
+    displayModeBar: true,
+    displaylogo: false,
+    modeBarButtonsToRemove: ['lasso2d','select2d'],
+  }});
+}}
+</script>
 </body>
 </html>"""
     return html
