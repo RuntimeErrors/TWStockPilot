@@ -603,7 +603,7 @@ def generate_group_html(group_name: str, results: list) -> str:
             tdcc_1k_html += f"<br><span style='font-size:0.75em;color:#cfcfcf;font-weight:normal;'>{r['tdcc_date']}</span>"
 
         rows_html += f"""
-        <tr class='data-row' onclick="toggleChart('{sid}')" style='cursor:pointer;'>
+        <tr class='data-row' onclick="toggleChart('{sid}')" ontouchend="toggleChart('{sid}')" style='cursor:pointer; -webkit-tap-highlight-color: transparent;'>
           <td style='font-weight:700;'>{medal} {sid} <span style='font-size:.75em;color:#60a5fa;'>▼</span></td>
           <td>{sname}</td>
           <td style='background:{sbg};color:#fff;font-weight:700;text-align:center;border-radius:4px;'>{sc}</td>
@@ -638,20 +638,26 @@ def generate_group_html(group_name: str, results: list) -> str:
         charts_html += f"""
     chartData['{sid}'] = {hist_json};"""
 
+    # 讀取本地端 Lightweight Charts 的 JS 檔案直接塞入，確保完全離線可用
+    script_dir = Path(__file__).parent
+    lw_js_path = script_dir / "lightweight-charts.standalone.production.js"
+    lw_js_content = ""
+    if lw_js_path.exists():
+        lw_js_content = lw_js_path.read_text(encoding="utf-8")
+    else:
+        # 如果沒有本地檔案當備用，還是給一個基本提示
+        lw_js_content = "console.error('Local lightweight-charts JS file not found!');"
+
     # ── HTML skeleton ────────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
 <title>{group_name} 族群分析 {TODAY_STR}</title>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script>
-  // 若官方 CDN 載入失敗，自動改用 jsDelivr 鏡像
-  if (typeof Plotly === 'undefined') {{
-    document.write('<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2.35.2/plotly.min.js"><\/script>');
-  }}
+{lw_js_content}
 </script>
-<noscript><p style="color:#f87171;text-align:center;padding:20px;">⚠️ 請在支援 JavaScript 的瀏覽器中開啟此報告以查看互動圖表。</p></noscript>
+<noscript><p style="color:#f87171;text-align:center;padding:20px;font-size:1.2rem;font-weight:bold;background:#2a1a1a;border:2px solid #f87171;margin:20px;">⚠️ 您的檢視器已停用 JavaScript！<br><br>iPad 的預設「檔案(Files)」或郵件預覽會阻擋 JavaScript 執行，導致圖表無法顯示。<br>請使用「Safari 瀏覽器」或第三方 App (如 Documents by Readdle) 開啟此檔案。</p></noscript>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
@@ -703,6 +709,7 @@ def generate_group_html(group_name: str, results: list) -> str:
     font-size: .88rem;
   }}
   tr.data-row:hover td {{ background: #1e2a45; }}
+  tr.data-row:active td {{ background: #1e2a45; }} /* 增加 active 狀態讓觸控有回饋 */
   .legend {{
     margin-top: 18px;
     font-size: .8rem;
@@ -763,126 +770,190 @@ def generate_group_html(group_name: str, results: list) -> str:
 // ── 歷史資料全域快取 ────────────────────────────────────────────
 const chartData = {{}};
 const rendered  = new Set();
+const chartsMap = {{}};
 {charts_html}
 
 // ── 切換走勢圖顯示 ──────────────────────────────────────────────
 function toggleChart(sid) {{
+  // 防抖動，避免觸控裝置同時觸發 ontouchend 與 onclick
+  if (window['_toggling_' + sid]) return;
+  window['_toggling_' + sid] = true;
+  setTimeout(() => window['_toggling_' + sid] = false, 300);
+
   const row = document.getElementById('chart-row-' + sid);
   if (!row) return;
   const visible = row.style.display !== 'none';
   row.style.display = visible ? 'none' : 'table-row';
-  if (!visible && !rendered.has(sid)) {{
-    rendered.add(sid);
-    renderChart(sid);
+  if (!visible) {{
+    if (!rendered.has(sid)) {{
+      rendered.add(sid);
+      // It's critical to wait for the browser to render the table row before initializing the chart
+      // otherwise container.clientWidth will be 0
+      setTimeout(() => {{
+        renderChart(sid);
+      }}, 50);
+    }} else if (chartsMap[sid]) {{
+      // Force resize check if container has changed dimensions
+      const container = document.getElementById('chart-' + sid);
+      if (container) {{
+         chartsMap[sid].applyOptions({{ width: container.clientWidth }});
+      }}
+      setTimeout(() => chartsMap[sid].timeScale().fitContent(), 10);
+    }}
   }}
 }}
 
-// ── 繪製 Plotly 走勢圖 ──────────────────────────────────────────
+// ── 繪製 TradingView Lightweight Charts 走勢圖 ──────────────────────────────────────────
 function renderChart(sid) {{
   const data = chartData[sid] || [];
   if (!data.length) return;
 
-  const dates    = data.map(d => d.date);
-  const opens    = data.map(d => d.open);
-  const highs    = data.map(d => d.high);
-  const lows     = data.map(d => d.low);
-  const closes   = data.map(d => d.close);
-  const volumes  = data.map(d => d.volume);
-  const ma5      = data.map(d => d.ma5);
-  const ma10     = data.map(d => d.ma10);
-  const ma20     = data.map(d => d.ma20);
-  const ma60     = data.map(d => d.ma60);
-  const bbUpper  = data.map(d => d.bb_upper);
-  const bbLower  = data.map(d => d.bb_lower);
+  const container = document.getElementById('chart-' + sid);
+  container.innerHTML = ''; // 清空
+  let initWidth = container.clientWidth;
+  if(initWidth === 0) initWidth = container.parentElement.clientWidth;
 
-  const candlestick = {{
-    type: 'candlestick',
-    x: dates, open: opens, high: highs, low: lows, close: closes,
-    name: sid,
-    increasing: {{ line: {{ color: '#ef5350' }}, fillcolor: '#ef5350' }},
-    decreasing: {{ line: {{ color: '#26a69a' }}, fillcolor: '#26a69a' }},
-    xaxis: 'x', yaxis: 'y',
-    hoverinfo: 'x+y',
-  }};
+  // 1. 初始化圖表
+  const chart = LightweightCharts.createChart(container, {{
+    width: initWidth,
+    height: 480,
+    layout: {{
+      background: {{ type: 'solid', color: '#131722' }},
+      textColor: '#9ca3af',
+    }},
+    grid: {{
+      vertLines: {{ color: '#1e2130' }},
+      horzLines: {{ color: '#1e2130' }},
+    }},
+    crosshair: {{
+      mode: LightweightCharts.CrosshairMode.Normal,
+    }},
+    rightPriceScale: {{
+      borderColor: '#2d3250',
+    }},
+    timeScale: {{
+      borderColor: '#2d3250',
+      timeVisible: true,
+    }},
+  }});
+  
+  chartsMap[sid] = chart;
 
-  const makeLine = (yArr, name, color, dash='solid', width=1.5) => ({{
-    type: 'scatter', mode: 'lines',
-    x: dates, y: yArr, name,
-    line: {{ color, width, dash }},
-    xaxis: 'x', yaxis: 'y',
-    hoverinfo: 'x+y+name',
+  // 2. 加入 K線
+  const mainSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {{
+    upColor: '#ef5350',
+    downColor: '#26a69a',
+    borderVisible: false,
+    wickUpColor: '#ef5350',
+    wickDownColor: '#26a69a',
   }});
 
-  // 布林帶填色
-  const bbFill = {{
-    type: 'scatter', mode: 'lines',
-    x: [...dates, ...dates.slice().reverse()],
-    y: [...bbUpper, ...bbLower.slice().reverse()],
-    fill: 'toself',
-    fillcolor: 'rgba(167,139,250,0.08)',
-    line: {{ width: 0 }},
-    name: 'BB Band',
-    showlegend: false,
-    xaxis: 'x', yaxis: 'y',
-    hoverinfo: 'skip',
-  }};
+  // TradingView 需要的資料結構: time, open, high, low, close
+  const candleData = data.map(d => ({{
+    time: d.date,
+    open: d.open,
+    high: d.high,
+    low: d.low,
+    close: d.close
+  }}));
+  mainSeries.setData(candleData);
 
-  const volColors = data.map((d,i) => (i === 0 || d.close >= d.open) ? 'rgba(239,83,80,0.6)' : 'rgba(38,166,154,0.6)');
-  const volBar = {{
-    type: 'bar',
-    x: dates, y: volumes,
-    name: '成交量',
-    marker: {{ color: volColors }},
-    xaxis: 'x', yaxis: 'y2',
-    hoverinfo: 'x+y',
-  }};
-
-  const traces = [
-    bbFill,
-    makeLine(bbUpper, 'BB Upper', '#a78bfa', 'dot', 1),
-    makeLine(bbLower, 'BB Lower', '#a78bfa', 'dot', 1),
-    makeLine(ma5,  'MA5',  '#f59e0b', 'solid', 1.2),
-    makeLine(ma10, 'MA10', '#fb923c', 'solid', 1.2),
-    makeLine(ma20, 'MA20', '#34d399', 'solid', 1.5),
-    makeLine(ma60, 'MA60', '#60a5fa', 'solid', 1.8),
-    candlestick,
-    volBar,
-  ];
-
-  const layout = {{
-    paper_bgcolor: '#131722',
-    plot_bgcolor:  '#131722',
-    font: {{ color: '#9ca3af', size: 11 }},
-    margin: {{ l: 55, r: 20, t: 30, b: 30 }},
-    showlegend: true,
-    legend: {{ orientation: 'h', y: 1.05, x: 0, font: {{ size: 11 }}, bgcolor: 'rgba(0,0,0,0)' }},
-    xaxis: {{
-      type: 'category',
-      rangeslider: {{ visible: false }},
-      showgrid: true, gridcolor: '#1e2130',
-      tickangle: -30,
-      nticks: 12,
+  // 3. 加入成交量 (Histogram Overlay)
+  const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {{
+    color: '#26a69a',
+    priceFormat: {{ type: 'volume' }},
+    priceScaleId: '', // 空字串代表不與主圖標尺共用
+    scaleMargins: {{
+      top: 0.8,
+      bottom: 0,
     }},
-    yaxis: {{
-      domain: [0.28, 1],
-      showgrid: true, gridcolor: '#1e2130',
-      title: {{ text: '價格', font: {{ size: 11 }} }},
-      side: 'right',
-    }},
-    yaxis2: {{
-      domain: [0, 0.22],
-      showgrid: false,
-      title: {{ text: '成交量', font: {{ size: 10 }} }},
-      side: 'right',
-    }},
-  }};
-
-  Plotly.newPlot('chart-' + sid, traces, layout, {{
-    responsive: true,
-    displayModeBar: true,
-    displaylogo: false,
-    modeBarButtonsToRemove: ['lasso2d','select2d'],
   }});
+  const volumeData = data.map(d => ({{
+    time: d.date,
+    value: d.volume,
+    color: d.close >= d.open ? 'rgba(239,83,80,0.4)' : 'rgba(38,166,154,0.4)'
+  }}));
+  volumeSeries.setData(volumeData);
+
+  // 4. 加入均線輔助函數
+  const addLine = (key, color, lineWidth, lineStyle, title) => {{
+    const series = chart.addSeries(LightweightCharts.LineSeries, {{
+      color,
+      lineWidth,
+      lineStyle,
+      title,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false
+    }});
+    const lineData = data.filter(d => d[key] !== null && d[key] !== undefined).map(d => ({{
+      time: d.date,
+      value: d[key]
+    }}));
+    if (lineData.length > 0) series.setData(lineData);
+  }};
+
+  addLine('ma5', '#f59e0b', 1, LightweightCharts.LineStyle.Solid, 'MA5');
+  addLine('ma10', '#fb923c', 1, LightweightCharts.LineStyle.Solid, 'MA10');
+  addLine('ma20', '#34d399', 1.5, LightweightCharts.LineStyle.Solid, 'MA20');
+  addLine('ma60', '#60a5fa', 1.5, LightweightCharts.LineStyle.Solid, 'MA60');
+  addLine('bb_upper', '#a78bfa', 1, LightweightCharts.LineStyle.Dotted, 'BB Upper');
+  addLine('bb_lower', '#a78bfa', 1, LightweightCharts.LineStyle.Dotted, 'BB Lower');
+
+  // 5. 製作浮動提示框 (Legend / Tooltip)
+  const legend = document.createElement('div');
+  legend.style.position = 'absolute';
+  legend.style.left = '12px';
+  legend.style.top = '12px';
+  legend.style.zIndex = 1;
+  legend.style.fontSize = '12px';
+  legend.style.fontFamily = 'monospace';
+  legend.style.lineHeight = '1.5';
+  legend.style.color = '#e4e6ea';
+  legend.style.pointerEvents = 'none';
+  container.style.position = 'relative';
+  container.appendChild(legend);
+
+  // 當滑鼠移動時更新提示框內的數據
+  chart.subscribeCrosshairMove((param) => {{
+    if (!param.time || param.point.x < 0 || param.point.x > container.clientWidth || param.point.y < 0 || param.point.y > container.clientHeight) {{
+      legend.innerHTML = '';
+      return;
+    }}
+    
+    // 從回傳的 Map 中找到 K 線對應的數據
+    const candleInfo = param.seriesData.get(mainSeries);
+    if (candleInfo) {{
+      let htmlStr = `<div style="font-size: 14px; font-weight: bold; margin-bottom: 4px; color: #fff;">${{sid}} - ${{param.time}}</div>`;
+      htmlStr += `O: <span>${{candleInfo.open}}</span>  `;
+      htmlStr += `H: <span>${{candleInfo.high}}</span>  `;
+      htmlStr += `L: <span>${{candleInfo.low}}</span>  `;
+      htmlStr += `C: <span>${{candleInfo.close}}</span><br>`;
+
+      // 可以利用原本的 full data 來顯示均線等，如果要在 seriesData 收尋也可以
+      // 這裡直接取 index 去 data 裡找，對齊更簡單
+      const index = data.findIndex(d => d.date === param.time);
+      if (index !== -1) {{
+        const fullNode = data[index];
+        htmlStr += `<span style="color:#f59e0b">MA5: ${{fullNode.ma5 || '-'}}</span> | `;
+        htmlStr += `<span style="color:#fb923c">MA10: ${{fullNode.ma10 || '-'}}</span> | `;
+        htmlStr += `<span style="color:#34d399">MA20: ${{fullNode.ma20 || '-'}}</span> | `;
+        htmlStr += `<span style="color:#60a5fa">MA60: ${{fullNode.ma60 || '-'}}</span>`;
+      }}
+      legend.innerHTML = htmlStr;
+    }}
+  }});
+
+  // 6. RWD 自適應大小
+  new ResizeObserver(entries => {{
+    if (entries.length === 0 || entries[0].target !== container) return;
+    const newRect = entries[0].contentRect;
+    if (newRect.width > 0) {{
+      chart.applyOptions({{ width: newRect.width }});
+    }}
+  }}).observe(container);
+
+  chart.timeScale().fitContent();
 }}
 </script>
 </body>
