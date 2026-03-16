@@ -1,5 +1,6 @@
 import os
 import io
+import csv
 import requests
 import pandas as pd
 import numpy as np
@@ -261,6 +262,50 @@ if tg_bot_token and tg_chat_id:
         else:
             print(f"❌ Failed to send Telegram message.")
             print(f"   Response: {response.text}")
+            
+        # ── 歷史報價 CSV 文字檔產出與傳送 ───────────────────────────────
+        if not df_plot_price.empty:
+            print("📤 Sending historical quotes CSV to Telegram...")
+            output = io.StringIO()
+            writer = csv.writer(output)
+            
+            # Header
+            writer.writerow([
+                "Date", "Open", "High", "Low", "Close", "Volume", 
+                "MA5", "MA10", "MA20", "MA60", "BB_Upper", "BB_Lower"
+            ])
+            
+            # Body: iterate over DataFrame
+            for idx, row in df_plot_price.iterrows():
+                writer.writerow([
+                    idx.strftime("%Y-%m-%d"),
+                    round(row.get("Open"), 2) if pd.notna(row.get("Open")) else "",
+                    round(row.get("High"), 2) if pd.notna(row.get("High")) else "",
+                    round(row.get("Low"), 2) if pd.notna(row.get("Low")) else "",
+                    round(row.get("Close"), 2) if pd.notna(row.get("Close")) else "",
+                    int(row.get("Volume")) if pd.notna(row.get("Volume")) else "",
+                    round(row.get("MA5"), 2) if pd.notna(row.get("MA5")) else "",
+                    round(row.get("MA10"), 2) if pd.notna(row.get("MA10")) else "",
+                    round(row.get("MA20"), 2) if pd.notna(row.get("MA20")) else "",
+                    round(row.get("MA60"), 2) if pd.notna(row.get("MA60")) else "",
+                    round(row.get("BB_Upper"), 2) if pd.notna(row.get("BB_Upper")) else "",
+                    round(row.get("BB_Lower"), 2) if pd.notna(row.get("BB_Lower")) else ""
+                ])
+                
+            csv_content = output.getvalue()
+            doc_name = f"{stock_id}_quotes_{datetime.datetime.now().strftime('%Y%m%d')}.txt"
+            
+            tg_doc_url = f"https://api.telegram.org/bot{tg_bot_token}/sendDocument"
+            doc_payload = {"chat_id": tg_chat_id, "caption": f"📈 【{stock_id}】歷史報價完整數據"}
+            doc_files = {"document": (doc_name, csv_content.encode('utf-8-sig'), "text/plain")}
+            doc_resp = requests.post(tg_doc_url, data=doc_payload, files=doc_files, timeout=60)
+            
+            if doc_resp.status_code == 200:
+                print(f"✅ Telegram historical quotes sent successfully: {doc_name}")
+            else:
+                print(f"❌ Failed to send Telegram historical quotes.")
+                print(f"   Response: {doc_resp.text}")
+
     except Exception as e:
         print(f"❌ Exception occurred while sending Telegram message: {e}")
 else:

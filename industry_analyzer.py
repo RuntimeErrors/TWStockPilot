@@ -1,5 +1,6 @@
 import os
 import io
+import csv
 import time
 import threading
 import requests
@@ -23,6 +24,47 @@ TG_CHAT_ID    = os.getenv("TG_CHAT_ID")
 import json as _json
 
 TW_TZ         = datetime.timezone(datetime.timedelta(hours=8))
+START_DATE    = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=3 * 365)).strftime("%Y-%m-%d")
+REPORT_DIR    = Path("reports")
+REPORT_DIR.mkdir(exist_ok=True)
+CACHE_DIR     = Path("cache")
+CACHE_DIR.mkdir(exist_ok=True)
+
+# ── 載入設定檔 config.json ─────────────────────────────────────────
+DEFAULT_CONFIG = {
+  "scoring": {
+    "tech": {"ma_bullish_score": 10, "ma_bearish_score": -15, "macd_cross_score": 10, "macd_bear_score": -5, "volume_breakout_multiplier": 1.5, "volume_breakout_score": 5},
+    "institutional": {"it_buy_score": 10, "it_sell_score": -5},
+    "margin": {"margin_drop_threshold": -1000, "margin_drop_score": -5, "short_ratio_threshold": 20, "short_ratio_score": -5},
+    "chip": {"tdcc_high_threshold": 60, "tdcc_high_score": 10, "tdcc_mid_threshold": 40, "tdcc_mid_score": 5, "tdcc_low_threshold": 20, "tdcc_low_score": -5},
+    "fundamental": {"rev_yoy_growth_score": 15, "rev_yoy_drop_score": -10, "gross_margin_threshold": 30, "gross_margin_score": 5, "op_margin_threshold": 10, "op_margin_score": 5}
+  },
+  "status_thresholds": {
+    "strong_bull": 75, "bull_bias": 60, "weak_consolidation": 40, "bear_start": 0
+  },
+  "indicators": {
+    "rsi_overbought": 70, "rsi_oversold": 30, "stop_loss_atr_multiple": 1.5
+  }
+}
+
+config_path = Path("config.json")
+if config_path.exists():
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            CONFIG = dict(DEFAULT_CONFIG)
+            user_config = _json.load(f)
+            # 支援部分覆蓋 (簡單第一層 or 第二層更新)
+            for k, v in user_config.items():
+                if isinstance(v, dict) and k in CONFIG:
+                    CONFIG[k].update(v)
+                else:
+                    CONFIG[k] = v
+    except Exception as e:
+        print(f"⚠️  讀取 config.json 失敗 ({e})，使用預設值")
+        CONFIG = DEFAULT_CONFIG
+else:
+    CONFIG = DEFAULT_CONFIG
+
 START_DATE    = (datetime.datetime.now(TW_TZ) - datetime.timedelta(days=3 * 365)).strftime("%Y-%m-%d")
 REPORT_DIR    = Path("reports")
 REPORT_DIR.mkdir(exist_ok=True)
@@ -347,44 +389,47 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
 
         # ── 多因子評分 ────────────────────────────────────────
         score = 50
+        c_score = CONFIG["scoring"]
 
         # 技術面
-        if last['Close'] > last['MA20'] and last['MA20'] > last['MA60']: score += 10
-        elif last['Close'] < last['MA20'] and last['MA20'] < last['MA60']: score -= 15
+        if last['Close'] > last['MA20'] and last['MA20'] > last['MA60']: score += c_score["tech"]["ma_bullish_score"]
+        elif last['Close'] < last['MA20'] and last['MA20'] < last['MA60']: score += c_score["tech"]["ma_bearish_score"]
 
-        if last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0:  score += 10
-        elif last['MACD_Hist'] < 0: score -= 5
+        if last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0:  score += c_score["tech"]["macd_cross_score"]
+        elif last['MACD_Hist'] < 0: score += c_score["tech"]["macd_bear_score"]
 
         v5_mean = dp['Volume'].tail(5).mean()
-        if v5_mean > 0 and last['Volume'] > v5_mean * 1.5 and last['Close'] > last['Open']:
-            score += 5
+        if v5_mean > 0 and last['Volume'] > v5_mean * c_score["tech"]["volume_breakout_multiplier"] and last['Close'] > last['Open']:
+            score += c_score["tech"]["volume_breakout_score"]
 
         # 法人面
-        score += 10 if it_5d > 0 else -5
+        score += c_score["institutional"]["it_buy_score"] if it_5d > 0 else c_score["institutional"]["it_sell_score"]
 
         # 融資融券面
-        if margin_5d is not None and margin_5d < -1000: score -= 5
-        if sr_ratio  is not None and sr_ratio  > 20:    score -= 5
+        if margin_5d is not None and margin_5d < c_score["margin"]["margin_drop_threshold"]: score += c_score["margin"]["margin_drop_score"]
+        if sr_ratio  is not None and sr_ratio  > c_score["margin"]["short_ratio_threshold"]:    score += c_score["margin"]["short_ratio_score"]
 
         # 籌碼面 (TDCC 千張大戶)
         if tdcc_1k_ratio is not None:
-            if tdcc_1k_ratio >= 60: score += 10    # 籌碼非常集中
-            elif tdcc_1k_ratio >= 40: score += 5     # 籌碼偏集中
-            elif tdcc_1k_ratio < 20: score -= 5      # 籌碼渙散
+            if tdcc_1k_ratio >= c_score["chip"]["tdcc_high_threshold"]: score += c_score["chip"]["tdcc_high_score"]    # 籌碼非常集中
+            elif tdcc_1k_ratio >= c_score["chip"]["tdcc_mid_threshold"]: score += c_score["chip"]["tdcc_mid_score"]     # 籌碼偏集中
+            elif tdcc_1k_ratio < c_score["chip"]["tdcc_low_threshold"]: score += c_score["chip"]["tdcc_low_score"]      # 籌碼渙散
 
         # 基本面
         if rev_yoy is not None:
-            score += 15 if rev_yoy > 0 else (-10 if rev_yoy < 0 else 0)
-        if gross_margin is not None and gross_margin > 30: score += 5
-        if op_margin    is not None and op_margin    > 10: score += 5
+            score += c_score["fundamental"]["rev_yoy_growth_score"] if rev_yoy > 0 else (c_score["fundamental"]["rev_yoy_drop_score"] if rev_yoy < 0 else 0)
+        if gross_margin is not None and gross_margin > c_score["fundamental"]["gross_margin_threshold"]: score += c_score["fundamental"]["gross_margin_score"]
+        if op_margin    is not None and op_margin    > c_score["fundamental"]["op_margin_threshold"]: score += c_score["fundamental"]["op_margin_score"]
 
         score = max(0, min(100, score))
 
+        c_status = CONFIG["status_thresholds"]
         status_map = [
-            (75, "強勢多頭"), (60, "震盪偏多"),
-            (40, "弱勢盤整"), (0,  "空頭啟動"),
+            (c_status["strong_bull"], "強勢多頭"), (c_status["bull_bias"], "震盪偏多"),
+            (c_status["weak_consolidation"], "弱勢盤整"), (c_status["bear_start"],  "空頭啟動"),
         ]
-        status = next(v for threshold, v in status_map if score >= threshold)
+        status_map.sort(key=lambda x: x[0], reverse=True)
+        status = next((v for threshold, v in status_map if score >= threshold), "資料不足")
 
         # ── 封裝清洗後純量結果 ────────────────────────────────
         def _r(v, n=2):
@@ -429,7 +474,7 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             "volume_ratio":_r(last['Volume'] / v5_mean, 2) if v5_mean > 0 else None,
             "resistance":  _r(resistances[-1]) if len(resistances) > 0 else None,
             "support":     _r(supports[-1])    if len(supports)    > 0 else None,
-            "stop_loss":   _r(float(last['Close']) - 1.5 * float(last['ATR14']))
+            "stop_loss":   _r(float(last['Close']) - CONFIG["indicators"]["stop_loss_atr_multiple"] * float(last['ATR14']))
                             if _r(last['ATR14']) else None,
             "macd_cross":  bool(last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0),
             # 法人
@@ -471,8 +516,8 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
 # ============================================================
 def _rsi_label(rsi):
     if rsi is None: return "N/A"
-    if rsi > 70: return f"{rsi}（超買過熱⚠️）"
-    if rsi < 30: return f"{rsi}（超賣區間💡）"
+    if rsi > CONFIG["indicators"]["rsi_overbought"]: return f"{rsi}（超買過熱⚠️）"
+    if rsi < CONFIG["indicators"]["rsi_oversold"]: return f"{rsi}（超賣區間💡）"
     return f"{rsi}（中性）"
 
 def generate_stock_text(r: dict) -> str:
@@ -488,8 +533,8 @@ def generate_stock_text(r: dict) -> str:
         f"  MACD：{'🔔 黃金交叉翻多' if r.get('macd_cross') else str(r['macd_hist'])}",
         f"  量比（vs 5MA）：{r['volume_ratio']}x",
         f"  布林通道：上軌 {r['bb_upper']}  下軌 {r['bb_lower']}",
-        f"  近期壓力：{r['resistance'] or 'N/A'}  近期支撐：{r['support'] or 'N/A'}"
-        f"  建議停損：{r['stop_loss'] or 'N/A'}（-1.5 ATR）",
+        f"  近期壓力：{r['resistance'] or 'N/A'}  近期支撐：{r['support'] or 'N/A'}",
+        f"  建議停損：{r['stop_loss'] or 'N/A'}（-{CONFIG['indicators']['stop_loss_atr_multiple']} ATR）",
         f"  -- chip data --",
         f"  foreign inv 5d: {r['fi_5d']} lots  investment trust 5d: {r['it_5d']} lots",
         f"  margin 5d chg: {(str(r['margin_5d'])+' lots') if r.get('margin_5d') is not None else 'N/A'}",
@@ -504,7 +549,7 @@ def generate_stock_text(r: dict) -> str:
     ]
 
     if   r['status'] == "強勢多頭": lines.append("  📈 建議：趨勢向上，沿 MA5/MA10 分批佈局，跌破 MA20 停損。")
-    elif r['status'] == "空頭啟動": lines.append("  📉 建議：趨勢偏空，等待 RSI<30 且反彈跡象再短線試單。")
+    elif r['status'] == "空頭啟動": lines.append(f"  📉 建議：趨勢偏空，等待 RSI<{CONFIG['indicators']['rsi_oversold']} 且反彈跡象再短線試單。")
     else:                            lines.append("  ⚖️  建議：方向不明，待帶量突破布林上軌後右側進場。")
 
     return "\n".join(lines)
@@ -551,15 +596,16 @@ import json as _json
 
 def _score_color(score) -> str:
     if score is None: return "#6c757d"
-    if score >= 75:   return "#198754"
-    if score >= 60:   return "#0d6efd"
-    if score >= 40:   return "#ffc107"
+    c_status = CONFIG["status_thresholds"]
+    if score >= c_status["strong_bull"]:   return "#198754"
+    if score >= c_status["bull_bias"]:   return "#0d6efd"
+    if score >= c_status["weak_consolidation"]:   return "#ffc107"
     return "#dc3545"
 
 def _rsi_color(rsi) -> str:
     if rsi is None: return ""
-    if rsi > 70: return "background:#fff3cd;"
-    if rsi < 30: return "background:#cfe2ff;"
+    if rsi > CONFIG["indicators"]["rsi_overbought"]: return "background:#fff3cd;"
+    if rsi < CONFIG["indicators"]["rsi_oversold"]: return "background:#cfe2ff;"
     return ""
 
 def _yoy_color(yoy) -> str:
@@ -596,7 +642,8 @@ def generate_group_html(group_name: str, results: list) -> str:
 
         macd_str = "🔔 黃金叉" if r.get('macd_cross') else _na(r['macd_hist'])
         vr = r['volume_ratio']
-        vr_str = f"<span style='color:#6f42c1;font-weight:600;'>{vr}x</span>" if vr and vr >= 1.5 else _na(vr, "x")
+        vr_thm = CONFIG["scoring"]["tech"]["volume_breakout_multiplier"]
+        vr_str = f"<span style='color:#6f42c1;font-weight:600;'>{vr}x</span>" if vr and vr >= vr_thm else _na(vr, "x")
 
         tdcc_1k_html = _na(r.get('tdcc_1k_ratio'), '%')
         if r.get('tdcc_date'):
@@ -622,9 +669,9 @@ def generate_group_html(group_name: str, results: list) -> str:
           <td style='text-align:right;'>{_na(r['pb'])}</td>
           <td style='text-align:right;'>{r['it_5d']} 張</td>
           <td style='text-align:right;'>{r['fi_5d']} 張</td>
-          <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("margin_5d") or 0) < -1000 else "color:#198754;font-weight:600;" if (r.get("margin_5d") or 0) > 0 else "")}'>{_na(r.get('margin_5d'), ' 張')}</td>
-          <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("sr_ratio") or 0) > 20 else "")}'>{_na(r.get('sr_ratio'), '%')}</td>
-          <td style='text-align:right;{("color:#198754;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) >= 60 else "color:#dc3545;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) < 20 else "")}'>{tdcc_1k_html}</td>
+          <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("margin_5d") or 0) < CONFIG["scoring"]["margin"]["margin_drop_threshold"] else "color:#198754;font-weight:600;" if (r.get("margin_5d") or 0) > 0 else "")}'>{_na(r.get('margin_5d'), ' 張')}</td>
+          <td style='text-align:right;{("color:#dc3545;font-weight:600;" if (r.get("sr_ratio") or 0) > CONFIG["scoring"]["margin"]["short_ratio_threshold"] else "")}'>{_na(r.get('sr_ratio'), '%')}</td>
+          <td style='text-align:right;{("color:#198754;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) >= CONFIG["scoring"]["chip"]["tdcc_high_threshold"] else "color:#dc3545;font-weight:700;" if (r.get("tdcc_1k_ratio") or 0) < CONFIG["scoring"]["chip"]["tdcc_low_threshold"] else "")}'>{tdcc_1k_html}</td>
         </tr>
         <tr id='{chart_row_id}' style='display:none;'>
           <td colspan='21' style='padding:0;background:#131722;'>
@@ -758,11 +805,11 @@ def generate_group_html(group_name: str, results: list) -> str:
 </table>
 </div>
 <div class="legend">
-  <span><span class="dot" style="background:#198754"></span>強勢多頭 (≥75)</span>
-  <span><span class="dot" style="background:#0d6efd"></span>震盪偏多 (60~74)</span>
-  <span><span class="dot" style="background:#ffc107"></span>弱勢盤整 (40~59)</span>
-  <span><span class="dot" style="background:#dc3545"></span>空頭啟動 (&lt;40)</span>
-  <span>🟡 RSI&gt;70 注意過熱 &nbsp; 🔵 RSI&lt;30 超賣zone</span>
+  <span><span class="dot" style="background:#198754"></span>強勢多頭 (≥{CONFIG["status_thresholds"]["strong_bull"]})</span>
+  <span><span class="dot" style="background:#0d6efd"></span>震盪偏多 ({CONFIG["status_thresholds"]["bull_bias"]}~{CONFIG["status_thresholds"]["strong_bull"]-1})</span>
+  <span><span class="dot" style="background:#ffc107"></span>弱勢盤整 ({CONFIG["status_thresholds"]["weak_consolidation"]}~{CONFIG["status_thresholds"]["bull_bias"]-1})</span>
+  <span><span class="dot" style="background:#dc3545"></span>空頭啟動 (&lt;{CONFIG["status_thresholds"]["weak_consolidation"]})</span>
+  <span>🟡 RSI&gt;{CONFIG["indicators"]["rsi_overbought"]} 注意過熱 &nbsp; 🔵 RSI&lt;{CONFIG["indicators"]["rsi_oversold"]} 超賣zone</span>
 </div>
 <p style="margin-top:16px;color:#4b5563;font-size:.78rem;">⚠️ 本報告為量化模型輸出，僅供 AI 輔助分析參考，不構成投資建議。</p>
 
@@ -962,7 +1009,42 @@ function renderChart(sid) {{
 
 
 # ============================================================
-# 8. Telegram 傳送（sendDocument）
+# 8. 歷史報價 CSV 文字檔產出
+# ============================================================
+def generate_group_quotes_text(results: list) -> str:
+    """將族群內的所有個股 price_history 攤平並轉為 CSV 格式字串"""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    writer.writerow([
+        "StockID", "StockName", "Date", "Open", "High", "Low", 
+        "Close", "Volume", "MA5", "MA10", "MA20", "MA60", 
+        "BB_Upper", "BB_Lower"
+    ])
+    
+    # Body
+    for r in results:
+        if r.get("error"):
+            continue
+        sid = r["stock_id"]
+        sname = r["stock_name"]
+        hist = r.get("price_history", [])
+        
+        for row in hist:
+            writer.writerow([
+                sid, sname, row.get("date", ""),
+                row.get("open", ""), row.get("high", ""), row.get("low", ""),
+                row.get("close", ""), row.get("volume", ""), row.get("ma5", ""),
+                row.get("ma10", ""), row.get("ma20", ""), row.get("ma60", ""),
+                row.get("bb_upper", ""), row.get("bb_lower", "")
+            ])
+            
+    return output.getvalue()
+
+
+# ============================================================
+# 9. Telegram 傳送（sendDocument）
 # ============================================================
 def _tg_send(file_path: Path, caption: str, mime: str = "text/plain") -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
@@ -1047,6 +1129,12 @@ def main():
         html_path.write_text(generate_group_html(group_name, results), encoding="utf-8")
         print(f"   🌐 HTML 儲存：{html_path}")
         _tg_send(html_path, f"📊 【{group_name}】視覺化比較表 {TIMESTAMP_STR}", mime="text/html")
+
+        # ── 歷史報價 CSV TXT 報告 ───────────────────────────────
+        quotes_txt_path = REPORT_DIR / f"{safe_name}_quotes_{TODAY_STR}.txt"
+        quotes_txt_path.write_text(generate_group_quotes_text(results), encoding="utf-8-sig")
+        print(f"   💾 Quotes 儲存：{quotes_txt_path}")
+        _tg_send(quotes_txt_path, f"📈 【{group_name}】歷史報價完整數據 {TIMESTAMP_STR}")
 
     print(f"\n{'='*60}")
     print(f"  ✅ 所有族群分析完成！")
