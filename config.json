@@ -1,7 +1,7 @@
 {
     "//_global_note": "系統全域設定 (包含各項多因子評分權重、門檻與技術指標參數)",
     "scoring": {
-        "//_scoring_note": "多因子評分系統設定：總成績作為判斷多空趨勢的依據 (滿分通常為100)",
+        "//_scoring_note": "多因子評分系統設定：總成績作為判斷多空趨勢的依據 (基準50分，加扣分後0~100)",
         "tech": {
             "//_tech_note": "【技術面指標評分設定】",
             "//_ma_bullish": "均線多頭排列加分：收盤價 > 月線(MA20) > 季線(MA60)",
@@ -15,24 +15,38 @@
             "//_vol_breakout_mult": "帶量突破倍數門檻：單日成交量需達到 5日均量 的多少倍才算突破",
             "volume_breakout_multiplier": 1.5,
             "//_vol_breakout_score": "帶量突破加分：滿足成交量倍數門檻，且當日收紅(收>開)時所加的分數",
-            "volume_breakout_score": 5
+            "volume_breakout_score": 5,
+            "//_price_new_high_days": "股價N日新高區間：股價創近N日高點視為強勢突破",
+            "price_new_high_days": 60,
+            "//_price_new_high_score": "股價N日新高加分",
+            "price_new_high_score": 5
         },
         "institutional": {
             "//_inst_note": "【法人籌碼面評分設定】",
             "//_it_buy": "投信連買加分：近五日投信買超累積數大於0",
             "it_buy_score": 10,
             "//_it_sell": "投信無買超扣分：近五日投信累積買超為0或賣超",
-            "it_sell_score": -5
+            "it_sell_score": -5,
+            "//_fi_buy": "外資連買加分：近五日外資買超累積數大於0",
+            "foreign_buy_score": 10,
+            "//_fi_sell": "外資連賣扣分：近五日外資累積賣超",
+            "foreign_sell_score": -8,
+            "//_all_inst_agree": "三大法人同步買超額外加分：外資與投信同步買超時給予額外獎勵",
+            "all_inst_agree_score": 5
         },
         "margin": {
             "//_margin_note": "【信用交易(融資融券)評分設定】",
-            "//_margin_drop_th": "融資減少門檻：近五日融資餘額減少超過此數量(張)，視為散戶退場/籌碼穩定",
-            "margin_drop_threshold": -1000,
-            "//_margin_drop_sc": "融資減少達標扣分/加分 (原設定為-5，可依策略視為負面或反向指標)",
-            "margin_drop_score": -5,
+            "//_margin_drop_th": "融資減少門檻：近五日融資餘額減少超過此數量(張)，視為籌碼乾淨穩定",
+            "margin_drop_threshold": -500,
+            "//_margin_drop_sc": "融資減少達標加分：融資縮減代表散戶退場、籌碼趨乾淨",
+            "margin_drop_score": 5,
+            "//_margin_surge_th": "融資暴增門檻：近五日融資餘額增加超過此數量(張)，視為散戶追高、風險提升",
+            "margin_surge_threshold": 2000,
+            "//_margin_surge_sc": "融資暴增扣分：散戶大量追高，籌碼不穩",
+            "margin_surge_score": -5,
             "//_sr_ratio_th": "券資比門檻(%)：大於此門檻視為潛在的軋空或高券資比狀況",
             "short_ratio_threshold": 20,
-            "//_sr_ratio_sc": "券資比達標分數：大於門檻時的加扣分 (原為扣分-5)",
+            "//_sr_ratio_sc": "券資比達標扣分：大於門檻時扣分（放空壓力大）",
             "short_ratio_score": -5
         },
         "chip": {
@@ -53,9 +67,13 @@
         "fundamental": {
             "//_fund_note": "【基本面與財務指標評分設定】",
             "//_rev_yoy_growth": "營收成長加分：最新月營收年增率 (YoY) > 0 時",
-            "rev_yoy_growth_score": 15,
+            "rev_yoy_growth_score": 10,
             "//_rev_yoy_drop": "營收衰退扣分：最新月營收年增率 (YoY) < 0 時",
             "rev_yoy_drop_score": -10,
+            "//_eps_yoy_growth": "EPS年增率加分：最新季EPS高於去年同季時",
+            "eps_yoy_growth_score": 10,
+            "//_eps_yoy_drop": "EPS年增率衰退扣分：最新季EPS低於去年同季時",
+            "eps_yoy_drop_score": -5,
             "//_gross_margin_th": "高毛利門檻(%)：最新一季毛利率大於此數值",
             "gross_margin_threshold": 30,
             "//_gross_margin_sc": "高毛利達標加分",
@@ -67,11 +85,11 @@
         }
     },
     "status_thresholds": {
-        "//_status_note": "【總分對應之多空格局門檻設定】",
+        "//_status_note": "【總分對應之多空格局門檻設定（強化後理論滿分約100）】",
         "//_strong_bull": "強勢多頭：總分 >= 此數值",
-        "strong_bull": 75,
+        "strong_bull": 65,
         "//_bull_bias": "震盪偏多：總分 >= 此數值 (且低於強勢多頭)",
-        "bull_bias": 60,
+        "bull_bias": 50,
         "//_weak_consolidation": "弱勢盤整：總分 >= 此數值 (且低於震盪偏多)",
         "weak_consolidation": 40,
         "//_bear_start": "空頭啟動：總分 < 弱勢盤整門檻 (預設底線為0)",

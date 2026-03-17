@@ -33,14 +33,32 @@ CACHE_DIR.mkdir(exist_ok=True)
 # ── 載入設定檔 config.json ─────────────────────────────────────────
 DEFAULT_CONFIG = {
   "scoring": {
-    "tech": {"ma_bullish_score": 10, "ma_bearish_score": -15, "macd_cross_score": 10, "macd_bear_score": -5, "volume_breakout_multiplier": 1.5, "volume_breakout_score": 5},
-    "institutional": {"it_buy_score": 10, "it_sell_score": -5},
-    "margin": {"margin_drop_threshold": -1000, "margin_drop_score": -5, "short_ratio_threshold": 20, "short_ratio_score": -5},
+    "tech": {
+      "ma_bullish_score": 10, "ma_bearish_score": -15,
+      "macd_cross_score": 10, "macd_bear_score": -5,
+      "volume_breakout_multiplier": 1.5, "volume_breakout_score": 5,
+      "price_new_high_days": 60, "price_new_high_score": 5
+    },
+    "institutional": {
+      "it_buy_score": 10, "it_sell_score": -5,
+      "foreign_buy_score": 10, "foreign_sell_score": -8,
+      "all_inst_agree_score": 5
+    },
+    "margin": {
+      "margin_drop_threshold": -500, "margin_drop_score": 5,
+      "margin_surge_threshold": 2000, "margin_surge_score": -5,
+      "short_ratio_threshold": 20, "short_ratio_score": -5
+    },
     "chip": {"tdcc_high_threshold": 60, "tdcc_high_score": 10, "tdcc_mid_threshold": 40, "tdcc_mid_score": 5, "tdcc_low_threshold": 20, "tdcc_low_score": -5},
-    "fundamental": {"rev_yoy_growth_score": 15, "rev_yoy_drop_score": -10, "gross_margin_threshold": 30, "gross_margin_score": 5, "op_margin_threshold": 10, "op_margin_score": 5}
+    "fundamental": {
+      "rev_yoy_growth_score": 10, "rev_yoy_drop_score": -10,
+      "eps_yoy_growth_score": 10, "eps_yoy_drop_score": -5,
+      "gross_margin_threshold": 30, "gross_margin_score": 5,
+      "op_margin_threshold": 10, "op_margin_score": 5
+    }
   },
   "status_thresholds": {
-    "strong_bull": 75, "bull_bias": 60, "weak_consolidation": 40, "bear_start": 0
+    "strong_bull": 65, "bull_bias": 50, "weak_consolidation": 40, "bear_start": 0
   },
   "indicators": {
     "rsi_overbought": 70, "rsi_oversold": 30, "stop_loss_atr_multiple": 1.5
@@ -203,9 +221,40 @@ def _disk_cache_save(stock_id: str, result: dict):
         print(f"   ⚠️  [{stock_id}] 磁碟快取寫入失敗: {e}")
 
 # ============================================================
+# 3.5 族群 Config 合併工具
+# ============================================================
+import copy as _copy
+
+def _merge_group_config(overrides: dict) -> dict:
+    """將族群的 config_overrides 深度合併到全域 CONFIG 的副本並回傳。
+    只合併第三層（scoring/section/key），不影響全域設定。"""
+    if not overrides:
+        return CONFIG
+    merged = _copy.deepcopy(CONFIG)
+    for section, section_val in overrides.items():          # e.g. "scoring"
+        if section not in merged:
+            merged[section] = {}
+        if isinstance(section_val, dict):
+            for sub, sub_val in section_val.items():         # e.g. "fundamental"
+                if sub not in merged[section]:
+                    merged[section][sub] = {}
+                if isinstance(sub_val, dict):
+                    merged[section][sub].update(sub_val)     # 更新 key-value
+                else:
+                    merged[section][sub] = sub_val
+        else:
+            merged[section] = section_val
+    return merged
+
+
+# ============================================================
 # 4. 單股分析 — 資料清洗 + 技術指標 + 基本面 + 評分
 # ============================================================
-def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
+def analyze_single_stock(stock_id: str, stock_name: str,
+                          group_config: dict | None = None) -> dict:
+    """分析單一股票。group_config 為可選的族群覆蓋 config（由 _merge_group_config 產生）。"""
+    # 若有族群 config 則使用，否則用全域 CONFIG
+    effective_config = group_config if group_config is not None else CONFIG
     # 1. 記憶體快取（同一與行程內）
     with _cache_lock:
         if stock_id in _stock_cache:
@@ -338,6 +387,21 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
         gross_margin = round(gross_profit / revenue_fs * 100, 1) if gross_profit and revenue_fs else None
         op_margin    = round(op_income    / revenue_fs * 100, 1) if op_income    and revenue_fs else None
 
+        # EPS YoY：從財務報表取最近8季EPS，比較最新季與去年同季
+        eps_yoy = None
+        if not df_fs.empty and 'type' in df_fs.columns and 'date' in df_fs.columns:
+            eps_mask = df_fs['type'].str.contains('EPS|每股盈餘|基本每股盈餘', na=False, case=False)
+            df_eps_hist = df_fs[eps_mask].copy()
+            if not df_eps_hist.empty:
+                df_eps_hist['date'] = pd.to_datetime(df_eps_hist['date'])
+                df_eps_hist['value'] = pd.to_numeric(df_eps_hist['value'], errors='coerce')
+                df_eps_hist = df_eps_hist.dropna(subset=['value']).sort_values('date')
+                if len(df_eps_hist) >= 5:  # 至少需要5筆才能算去年同季
+                    latest_eps_val = float(df_eps_hist['value'].iloc[-1])
+                    yoy_eps_val    = float(df_eps_hist['value'].iloc[-5])  # 去年同季（約4季前）
+                    if yoy_eps_val != 0:
+                        eps_yoy = round((latest_eps_val - yoy_eps_val) / abs(yoy_eps_val) * 100, 1)
+
         # -- margin data (融資融券) --
         margin_5d = sr_ratio = None
         df_margin = data.get("margin", pd.DataFrame())
@@ -389,37 +453,78 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
 
         # ── 多因子評分 ────────────────────────────────────────
         score = 50
-        c_score = CONFIG["scoring"]
+        c_score = effective_config["scoring"]
 
-        # 技術面
-        if last['Close'] > last['MA20'] and last['MA20'] > last['MA60']: score += c_score["tech"]["ma_bullish_score"]
-        elif last['Close'] < last['MA20'] and last['MA20'] < last['MA60']: score += c_score["tech"]["ma_bearish_score"]
+        # 【技術面】
+        # 均線多空排列
+        if last['Close'] > last['MA20'] and last['MA20'] > last['MA60']:
+            score += c_score["tech"]["ma_bullish_score"]
+        elif last['Close'] < last['MA20'] and last['MA20'] < last['MA60']:
+            score += c_score["tech"]["ma_bearish_score"]
 
-        if last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0:  score += c_score["tech"]["macd_cross_score"]
-        elif last['MACD_Hist'] < 0: score += c_score["tech"]["macd_bear_score"]
+        # MACD
+        if last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0:
+            score += c_score["tech"]["macd_cross_score"]
+        elif last['MACD_Hist'] < 0:
+            score += c_score["tech"]["macd_bear_score"]
 
+        # 帶量突破
         v5_mean = dp['Volume'].tail(5).mean()
         if v5_mean > 0 and last['Volume'] > v5_mean * c_score["tech"]["volume_breakout_multiplier"] and last['Close'] > last['Open']:
             score += c_score["tech"]["volume_breakout_score"]
 
-        # 法人面
+        # ★ 股價 N 日新高（突破前高）
+        nh_days = int(c_score["tech"].get("price_new_high_days", 60))
+        price_is_new_high = False
+        if len(dp) >= nh_days:
+            recent_high = dp['High'].iloc[-(nh_days+1):-1].max()  # 排除今日
+            if float(last['Close']) >= recent_high:
+                score += c_score["tech"]["price_new_high_score"]
+                price_is_new_high = True
+
+        # 【法人面】
+        # 投信
         score += c_score["institutional"]["it_buy_score"] if it_5d > 0 else c_score["institutional"]["it_sell_score"]
+        # ★ 外資
+        score += c_score["institutional"]["foreign_buy_score"] if fi_5d > 0 else c_score["institutional"]["foreign_sell_score"]
+        # ★ 三大法人同步買超（外資+投信同步）
+        if fi_5d > 0 and it_5d > 0:
+            score += c_score["institutional"]["all_inst_agree_score"]
 
-        # 融資融券面
-        if margin_5d is not None and margin_5d < c_score["margin"]["margin_drop_threshold"]: score += c_score["margin"]["margin_drop_score"]
-        if sr_ratio  is not None and sr_ratio  > c_score["margin"]["short_ratio_threshold"]:    score += c_score["margin"]["short_ratio_score"]
+        # 【融資融券面】（雙向邏輯）
+        if margin_5d is not None:
+            if margin_5d < c_score["margin"]["margin_drop_threshold"]:
+                # ★ 融資縮減：籌碼趨乾淨，正向加分
+                score += c_score["margin"]["margin_drop_score"]
+            elif margin_5d > c_score["margin"].get("margin_surge_threshold", 2000):
+                # ★ 融資暴增：散戶追高，負向扣分
+                score += c_score["margin"]["margin_surge_score"]
+        if sr_ratio is not None and sr_ratio > c_score["margin"]["short_ratio_threshold"]:
+            score += c_score["margin"]["short_ratio_score"]
 
-        # 籌碼面 (TDCC 千張大戶)
+        # 【籌碼面】TDCC 千張大戶
         if tdcc_1k_ratio is not None:
-            if tdcc_1k_ratio >= c_score["chip"]["tdcc_high_threshold"]: score += c_score["chip"]["tdcc_high_score"]    # 籌碼非常集中
-            elif tdcc_1k_ratio >= c_score["chip"]["tdcc_mid_threshold"]: score += c_score["chip"]["tdcc_mid_score"]     # 籌碼偏集中
-            elif tdcc_1k_ratio < c_score["chip"]["tdcc_low_threshold"]: score += c_score["chip"]["tdcc_low_score"]      # 籌碼渙散
+            if tdcc_1k_ratio >= c_score["chip"]["tdcc_high_threshold"]:
+                score += c_score["chip"]["tdcc_high_score"]    # 籌碼非常集中
+            elif tdcc_1k_ratio >= c_score["chip"]["tdcc_mid_threshold"]:
+                score += c_score["chip"]["tdcc_mid_score"]     # 籌碼偏集中
+            elif tdcc_1k_ratio < c_score["chip"]["tdcc_low_threshold"]:
+                score += c_score["chip"]["tdcc_low_score"]     # 籌碼渙散
 
-        # 基本面
+        # 【基本面】
+        # 月營收 YoY
         if rev_yoy is not None:
-            score += c_score["fundamental"]["rev_yoy_growth_score"] if rev_yoy > 0 else (c_score["fundamental"]["rev_yoy_drop_score"] if rev_yoy < 0 else 0)
-        if gross_margin is not None and gross_margin > c_score["fundamental"]["gross_margin_threshold"]: score += c_score["fundamental"]["gross_margin_score"]
-        if op_margin    is not None and op_margin    > c_score["fundamental"]["op_margin_threshold"]: score += c_score["fundamental"]["op_margin_score"]
+            if rev_yoy > 0:   score += c_score["fundamental"]["rev_yoy_growth_score"]
+            elif rev_yoy < 0: score += c_score["fundamental"]["rev_yoy_drop_score"]
+        # ★ EPS YoY（季度比較）
+        if eps_yoy is not None:
+            if eps_yoy > 0:   score += c_score["fundamental"].get("eps_yoy_growth_score", 10)
+            elif eps_yoy < 0: score += c_score["fundamental"].get("eps_yoy_drop_score", -5)
+        # 毛利率 / 營益率
+        if gross_margin is not None and gross_margin > c_score["fundamental"]["gross_margin_threshold"]:
+            score += c_score["fundamental"]["gross_margin_score"]
+        if op_margin is not None and op_margin > c_score["fundamental"]["op_margin_threshold"]:
+            score += c_score["fundamental"]["op_margin_score"]
 
         score = max(0, min(100, score))
 
@@ -463,20 +568,21 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             "score":    score,
             "status":   status,
             # 技術
-            "close":       _r(last['Close']),
-            "ma20":        _r(last['MA20']),
-            "ma60":        _r(last['MA60']),
-            "rsi14":       _r(last['RSI14'], 1),
-            "macd_hist":   _r(last['MACD_Hist'], 3),
-            "atr14":       _r(last['ATR14']),
-            "bb_upper":    _r(last['BB_Upper']),
-            "bb_lower":    _r(last['BB_Lower']),
-            "volume_ratio":_r(last['Volume'] / v5_mean, 2) if v5_mean > 0 else None,
-            "resistance":  _r(resistances[-1]) if len(resistances) > 0 else None,
-            "support":     _r(supports[-1])    if len(supports)    > 0 else None,
-            "stop_loss":   _r(float(last['Close']) - CONFIG["indicators"]["stop_loss_atr_multiple"] * float(last['ATR14']))
-                            if _r(last['ATR14']) else None,
-            "macd_cross":  bool(last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0),
+            "close":          _r(last['Close']),
+            "ma20":           _r(last['MA20']),
+            "ma60":           _r(last['MA60']),
+            "rsi14":          _r(last['RSI14'], 1),
+            "macd_hist":      _r(last['MACD_Hist'], 3),
+            "atr14":          _r(last['ATR14']),
+            "bb_upper":       _r(last['BB_Upper']),
+            "bb_lower":       _r(last['BB_Lower']),
+            "volume_ratio":   _r(last['Volume'] / v5_mean, 2) if v5_mean > 0 else None,
+            "resistance":     _r(resistances[-1]) if len(resistances) > 0 else None,
+            "support":        _r(supports[-1])    if len(supports)    > 0 else None,
+            "stop_loss":      _r(float(last['Close']) - effective_config["indicators"]["stop_loss_atr_multiple"] * float(last['ATR14']))
+                               if _r(last['ATR14']) else None,
+            "macd_cross":     bool(last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0),
+            "price_is_new_high": price_is_new_high,          # ★ N日新高
             # 法人
             "fi_5d": round(fi_5d / 1000, 1),
             "it_5d": round(it_5d / 1000, 1),
@@ -484,7 +590,8 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             "latest_rev": _r(latest_rev / 1e8, 2) if latest_rev else None,
             "rev_yoy":    _r(rev_yoy, 1)           if rev_yoy is not None else None,
             # 基本面
-            "eps":          _r(eps, 2)          if eps is not None else None,
+            "eps":          _r(eps, 2)     if eps     is not None else None,
+            "eps_yoy":      _r(eps_yoy, 1) if eps_yoy is not None else None,  # ★ EPS YoY
             "gross_margin": gross_margin,
             "op_margin":    op_margin,
             # 估值
@@ -495,7 +602,7 @@ def analyze_single_stock(stock_id: str, stock_name: str) -> dict:
             "sr_ratio":  sr_ratio,
             # TDCC 籌碼
             "tdcc_1k_ratio": _r(tdcc_1k_ratio, 2),
-            "tdcc_date": tdcc_date,
+            "tdcc_date":     tdcc_date,
             # 歷史走勢序列
             "price_history": price_history,
         })
@@ -531,16 +638,18 @@ def generate_stock_text(r: dict) -> str:
         f"  收盤價：{r['close']}  MA20：{r['ma20']}  MA60：{r['ma60']}",
         f"  RSI14：{_rsi_label(r['rsi14'])}",
         f"  MACD：{'🔔 黃金交叉翻多' if r.get('macd_cross') else str(r['macd_hist'])}",
-        f"  量比（vs 5MA）：{r['volume_ratio']}x",
+        f"  量比（vs 5MA）：{r['volume_ratio']}x"
+        + ("  📈 股價創60日新高" if r.get('price_is_new_high') else ""),
         f"  布林通道：上軌 {r['bb_upper']}  下軌 {r['bb_lower']}",
         f"  近期壓力：{r['resistance'] or 'N/A'}  近期支撐：{r['support'] or 'N/A'}",
         f"  建議停損：{r['stop_loss'] or 'N/A'}（-{CONFIG['indicators']['stop_loss_atr_multiple']} ATR）",
-        f"  -- chip data --",
-        f"  foreign inv 5d: {r['fi_5d']} lots  investment trust 5d: {r['it_5d']} lots",
-        f"  margin 5d chg: {(str(r['margin_5d'])+' lots') if r.get('margin_5d') is not None else 'N/A'}",
-        f"  short/margin ratio: {(str(r['sr_ratio'])+'%') if r.get('sr_ratio') is not None else 'N/A'}",
+        f"  ── 法人籌碼 ──",
+        f"  外資5日：{r['fi_5d']} 張  投信5日：{r['it_5d']} 張",
+        f"  融資增減：{(str(r['margin_5d'])+' 張') if r.get('margin_5d') is not None else 'N/A'}",
+        f"  券資比：{(str(r['sr_ratio'])+'%') if r.get('sr_ratio') is not None else 'N/A'}",
         f"  ── 基本面 ──",
-        f"  EPS：{r['eps'] or 'N/A'}  毛利率：{r['gross_margin'] or 'N/A'}%  營益率：{r['op_margin'] or 'N/A'}%",
+        f"  EPS：{r['eps'] or 'N/A'}  EPS YoY：{(str(r['eps_yoy'])+'%') if r.get('eps_yoy') is not None else 'N/A'}",
+        f"  毛利率：{r['gross_margin'] or 'N/A'}%  營益率：{r['op_margin'] or 'N/A'}%",
         f"  P/E：{r['pe'] or 'N/A'}  P/B：{r['pb'] or 'N/A'}",
         f"  最新月營收：{(str(r['latest_rev'])+' 億') if r['latest_rev'] else 'N/A'}"
         f"  年增率：{(str(r['rev_yoy'])+'%') if r['rev_yoy'] is not None else 'N/A'}",
@@ -604,8 +713,8 @@ def _score_color(score) -> str:
 
 def _rsi_color(rsi) -> str:
     if rsi is None: return ""
-    if rsi > CONFIG["indicators"]["rsi_overbought"]: return "background:#fff3cd;"
-    if rsi < CONFIG["indicators"]["rsi_oversold"]: return "background:#cfe2ff;"
+    if rsi > CONFIG["indicators"]["rsi_overbought"]: return "color:#ffc107;font-weight:600;"
+    if rsi < CONFIG["indicators"]["rsi_oversold"]: return "color:#0d6efd;font-weight:600;"
     return ""
 
 def _yoy_color(yoy) -> str:
@@ -1086,7 +1195,21 @@ def main():
     print(f"  分析族群數：{len(INDUSTRY_GROUPS)}")
     print(f"{'='*60}\n")
 
-    for group_name, stocks in INDUSTRY_GROUPS.items():
+    for group_name, group_data in INDUSTRY_GROUPS.items():
+        # ── 解構新格式（相容舊格式）──────────────────────────────
+        if isinstance(group_data, dict) and "stocks" in group_data:
+            stocks   = group_data["stocks"]
+            overrides = group_data.get("config_overrides", {})
+        else:
+            # 向下相容：若仍為舊 {sid: sname} 格式
+            stocks   = group_data
+            overrides = {}
+
+        # 產生此族群的合併 config（不影響全域 CONFIG）
+        group_cfg = _merge_group_config(overrides)
+        if overrides:
+            print(f"   ⚙️  套用產業門檻覆蓋：{list(overrides.get('scoring', {}).keys())}")
+
         print(f"\n📊 開始分析族群：【{group_name}】（共 {len(stocks)} 支）")
         # ── 優化③：族群內個股並行分析 ───────────────────────────
         # 有 Token 用 3 執行緒；無 Token 降為 1（序列）避免限流
@@ -1094,7 +1217,7 @@ def main():
         results_map: dict = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             fut_to_sid = {
-                pool.submit(analyze_single_stock, sid, sname): sid
+                pool.submit(analyze_single_stock, sid, sname, group_cfg): sid
                 for sid, sname in stocks.items()
             }
             for fut in concurrent.futures.as_completed(fut_to_sid):
