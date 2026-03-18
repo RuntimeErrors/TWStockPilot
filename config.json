@@ -102,6 +102,8 @@
         "//_rsi_oversold": "RSI 超賣門檻：數值小於此值時會提示超賣區間",
         "rsi_oversold": 30,
         "//_stop_loss_atr": "停損價 ATR 係數：建議停損價 = 收盤價 - 係數 * ATR14 (真實波動幅度)",
-        "stop_loss_atr_multiple": 1.5
+        "stop_loss_atr_multiple": 1.5,
+        "//_quotes_export_days": "報價匯出天數：匯出為 TXT 檔的歷史報價天數長度",
+        "quotes_export_days": 90
     }
 }

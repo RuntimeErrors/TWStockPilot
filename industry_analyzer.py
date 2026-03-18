@@ -103,23 +103,25 @@ else:
 # ============================================================
 # 2. 資料下載 helpers
 # ============================================================
-def _fetch(label: str, func, stock_id: str):
+def _fetch(label: str, func, stock_id: str, custom_start_date: str = None):
     """FinMind 資料下載，失敗立即回傳空 DataFrame（不重試）。"""
+    sd = custom_start_date if custom_start_date else START_DATE
     try:
-        df = func(stock_id=stock_id, start_date=START_DATE)
+        df = func(stock_id=stock_id, start_date=sd)
         return label, df if (df is not None and not df.empty) else pd.DataFrame()
     except Exception as e:
         print(f"   ⚠️  [{stock_id}] {label} 下載失敗: {e}")
         return label, pd.DataFrame()
 
 
-def _fetch_per(stock_id: str):
+def _fetch_per(stock_id: str, custom_start_date: str = None):
     """直接呼叫 FinMind REST API 取得 TaiwanStockPER（P/E、P/B）。
     SDK 目前無對應方法，故改用 HTTP。"""
+    sd = custom_start_date if custom_start_date else START_DATE
     params = {
         "dataset": "TaiwanStockPER",
         "data_id": stock_id,
-        "start_date": START_DATE,
+        "start_date": sd,
     }
     if FINMIND_TOKEN:
         params["token"] = FINMIND_TOKEN
@@ -277,14 +279,18 @@ def analyze_single_stock(stock_id: str, stock_name: str,
     try:
         # ── 並行下載 ──────────────────────────────────────────
         data: dict = {}
+        now_date = datetime.datetime.now(TW_TZ)
+        def _get_sd(days: int) -> str:
+            return (now_date - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=7) as ex:
             futs = [
-                ex.submit(_fetch, "price",        api.taiwan_stock_daily,                     stock_id),
-                ex.submit(_fetch, "financial",    api.taiwan_stock_financial_statement,        stock_id),
-                ex.submit(_fetch_per,             stock_id),
-                ex.submit(_fetch, "revenue",      api.taiwan_stock_month_revenue,              stock_id),
-                ex.submit(_fetch, "institutional", api.taiwan_stock_institutional_investors,   stock_id),
-                ex.submit(_fetch, "margin",       api.taiwan_stock_margin_purchase_short_sale, stock_id),
+                ex.submit(_fetch, "price",        api.taiwan_stock_daily,                     stock_id, _get_sd(365)),
+                ex.submit(_fetch, "financial",    api.taiwan_stock_financial_statement,        stock_id, _get_sd(800)),
+                ex.submit(_fetch_per,             stock_id, _get_sd(30)),
+                ex.submit(_fetch, "revenue",      api.taiwan_stock_month_revenue,              stock_id, _get_sd(450)),
+                ex.submit(_fetch, "institutional", api.taiwan_stock_institutional_investors,   stock_id, _get_sd(30)),
+                ex.submit(_fetch, "margin",       api.taiwan_stock_margin_purchase_short_sale, stock_id, _get_sd(30)),
                 ex.submit(_fetch_tdcc,            stock_id),
             ]
             for f in concurrent.futures.as_completed(futs):
@@ -1140,6 +1146,10 @@ def generate_group_quotes_text(results: list) -> str:
         sname = r["stock_name"]
         hist = r.get("price_history", [])
         
+        export_days = CONFIG.get("indicators", {}).get("quotes_export_days", 30)
+        if export_days > 0:
+            hist = hist[-export_days:]
+            
         for row in hist:
             writer.writerow([
                 sid, sname, row.get("date", ""),
@@ -1190,7 +1200,7 @@ def _tg_msg(text: str) -> bool:
 
 def main():
     print(f"\n{'='*60}")
-    print(f"  🚀 TwinStock 族群分析系統啟動")
+    print(f"  🚀 TWStockPilot 族群分析系統啟動")
     print(f"  分析時間：{TIMESTAMP_STR}")
     print(f"  分析族群數：{len(INDUSTRY_GROUPS)}")
     print(f"{'='*60}\n")
@@ -1225,7 +1235,7 @@ def main():
                 results_map[r['stock_id']] = r
                 if r.get("error"):
                     err_msg = (
-                        f"⚠️ TwinStock 下載失敗\n"
+                        f"⚠️ TWStockPilot 下載失敗\n"
                         f"族群：{group_name}\n"
                         f"股票：{r['stock_id']} {r['stock_name']}\n"
                         f"錯誤：{r['error']}\n"

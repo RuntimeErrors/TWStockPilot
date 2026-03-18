@@ -33,11 +33,12 @@ print(f"🚀 Started {stock_id} Full Quantitative Analysis System...")
 # ==========================================
 # 2. Data Fetching
 # ==========================================
-def get_finmind_data(dataset_name, func):
+def get_finmind_data(dataset_name, func, custom_start_date=None):
     # For CI, we skip local caching or we only cache temporarily
+    sd = custom_start_date if custom_start_date else start_date
     print(f"📥 Downloading {dataset_name}...")
     try:
-        df = func(stock_id=stock_id, start_date=start_date)
+        df = func(stock_id=stock_id, start_date=sd)
         if df is not None and not df.empty:
             return dataset_name, df
     except Exception as e:
@@ -61,14 +62,18 @@ def get_tdcc_latest(stock_id):
     return "tdcc", pd.DataFrame()
 
 data_dict = {}
+now_date = datetime.datetime.now()
+def _get_sd_main(days):
+    return (now_date - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
     futures = [
-        executor.submit(get_finmind_data, "price", api.taiwan_stock_daily),
-        executor.submit(get_finmind_data, "financial", api.taiwan_stock_financial_statement),
-        executor.submit(get_finmind_data, "revenue", api.taiwan_stock_month_revenue),
-        executor.submit(get_finmind_data, "institutional", api.taiwan_stock_institutional_investors),
-        executor.submit(get_finmind_data, "margin", api.taiwan_stock_margin_purchase_short_sale),
-        executor.submit(get_finmind_data, "balance_sheet", api.taiwan_stock_balance_sheet),
+        executor.submit(get_finmind_data, "price", api.taiwan_stock_daily, _get_sd_main(365)),
+        executor.submit(get_finmind_data, "financial", api.taiwan_stock_financial_statement, _get_sd_main(800)),
+        executor.submit(get_finmind_data, "revenue", api.taiwan_stock_month_revenue, _get_sd_main(450)),
+        executor.submit(get_finmind_data, "institutional", api.taiwan_stock_institutional_investors, _get_sd_main(30)),
+        executor.submit(get_finmind_data, "margin", api.taiwan_stock_margin_purchase_short_sale, _get_sd_main(30)),
+        executor.submit(get_finmind_data, "balance_sheet", api.taiwan_stock_balance_sheet, _get_sd_main(800)),
         executor.submit(get_tdcc_latest, stock_id)
     ]
     for future in concurrent.futures.as_completed(futures):
@@ -275,8 +280,17 @@ if tg_bot_token and tg_chat_id:
                 "MA5", "MA10", "MA20", "MA60", "BB_Upper", "BB_Lower"
             ])
             
-            # Body: iterate over DataFrame
-            for idx, row in df_plot_price.iterrows():
+            # Body: iterate over DataFrame (limit to recent 30 days)
+            import json
+            try:
+                with open("config.json", "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    export_days = cfg.get("indicators", {}).get("quotes_export_days", 30)
+            except Exception:
+                export_days = 30
+            export_df = df_plot_price.tail(export_days) if export_days > 0 else df_plot_price
+            
+            for idx, row in export_df.iterrows():
                 writer.writerow([
                     idx.strftime("%Y-%m-%d"),
                     round(row.get("Open"), 2) if pd.notna(row.get("Open")) else "",
