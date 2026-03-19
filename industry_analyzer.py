@@ -11,6 +11,8 @@ import concurrent.futures
 from pathlib import Path
 from scipy.signal import argrelextrema
 from FinMind.data import DataLoader
+# from bs4 import BeautifulSoup
+# import re
 
 from industry_groups import INDUSTRY_GROUPS
 
@@ -135,6 +137,58 @@ def _fetch_per(stock_id: str, custom_start_date: str = None):
     except Exception as e:
         print(f"   ⚠️  [{stock_id}] valuation(PER) 下載失敗: {e}")
     return "valuation", pd.DataFrame()
+
+
+# def _fetch_etf_holdings(stock_id: str):
+#     """從 Yahoo Finance 爬取 ETF 的前五大成分股與權重"""
+#     # 簡單防呆: 如果是 00 開頭的股票才去抓，節省一般上市櫃公司的時間
+#     if not stock_id.startswith('00'):
+#         return "etf_holdings", []
+# 
+#     url = f'https://tw.stock.yahoo.com/quote/{stock_id}.TW/holding'
+#     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+#     try:
+#         r = requests.get(url, headers=headers, timeout=10)
+#         soup = BeautifulSoup(r.text, 'lxml')
+#         items = soup.find_all('li', class_=lambda c: c and 'List(n)' in c)
+#         
+#         holdings = []
+#         for item in items[:5]:
+#             try:
+#                 # 只取有內部 a 連結，且連去 /quote/ 的項目，排除 Yahoo 廣告推薦
+#                 a_tags = item.find_all('a', href=re.compile(r'/quote/'))
+#                 if not a_tags:
+#                     continue
+#                 
+#                 # 尋找名稱：通常在 class 包含 Lh(20px) 的 div
+#                 name_div = item.find('div', class_=lambda c: c and 'Lh(20px)' in c)
+#                 name = name_div.text.strip() if name_div else ''
+#                 
+#                 # 從標籤內所有的純潔文字片段尋找 %
+#                 texts = list(item.stripped_strings)
+#                 weight = 0.0
+#                 for t in texts:
+#                     if t.endswith('%'):
+#                         try:
+#                             weight = float(t.replace('%', ''))
+#                         except Exception:
+#                             pass
+#                         break
+#                         
+#                 if name and weight > 0:
+#                     # 排除 Yahoo 廣告推薦的其他 ETF
+#                     if '高股息' not in name and 'ETF' not in name and '基金' not in name and '30' not in name and '50' not in name and '優息' not in name:
+#                         holdings.append({'name': name, 'weight': weight})
+#             except Exception:
+#                 pass
+#             
+#             if len(holdings) >= 5:
+#                 break
+#                 
+#         return "etf_holdings", holdings
+#     except Exception as e:
+#         print(f"   ⚠️  [{stock_id}] ETF 成分股下載失敗: {e}")
+#         return "etf_holdings", []
 
 
 # ── 優化①：TDCC 全域快取（只下載一次，所有股票共用）──────────
@@ -292,6 +346,7 @@ def analyze_single_stock(stock_id: str, stock_name: str,
                 ex.submit(_fetch, "institutional", api.taiwan_stock_institutional_investors,   stock_id, _get_sd(30)),
                 ex.submit(_fetch, "margin",       api.taiwan_stock_margin_purchase_short_sale, stock_id, _get_sd(30)),
                 ex.submit(_fetch_tdcc,            stock_id),
+                # ex.submit(_fetch_etf_holdings,    stock_id),
             ]
             for f in concurrent.futures.as_completed(futs):
                 label, df = f.result()
@@ -609,6 +664,8 @@ def analyze_single_stock(stock_id: str, stock_name: str,
             # TDCC 籌碼
             "tdcc_1k_ratio": _r(tdcc_1k_ratio, 2),
             "tdcc_date":     tdcc_date,
+            # ETF成分股
+            "etf_holdings":  data.get("etf_holdings", []),
             # 歷史走勢序列
             "price_history": price_history,
         })
@@ -663,9 +720,14 @@ def generate_stock_text(r: dict) -> str:
         f"  千張大戶持股比例：{(str(r['tdcc_1k_ratio'])+'%') if r.get('tdcc_1k_ratio') is not None else 'N/A'} " + (f"(資料日期: {r['tdcc_date']})" if r.get('tdcc_date') else ""),
     ]
 
-    if   r['status'] == "強勢多頭": lines.append("  📈 建議：趨勢向上，沿 MA5/MA10 分批佈局，跌破 MA20 停損。")
-    elif r['status'] == "空頭啟動": lines.append(f"  📉 建議：趨勢偏空，等待 RSI<{CONFIG['indicators']['rsi_oversold']} 且反彈跡象再短線試單。")
-    else:                            lines.append("  ⚖️  建議：方向不明，待帶量突破布林上軌後右側進場。")
+    # if r.get("etf_holdings"):
+    #     lines.append("  ── ETF 主要成分股 ──")
+    #     holds_str = "、".join([f"{h['name']} ({h['weight']}%)" for h in r["etf_holdings"]])
+    #     lines.append(f"  {holds_str}")
+
+    if   r['status'] == "強勢多頭": lines.append("\n  📈 建議：趨勢向上，沿 MA5/MA10 分批佈局，跌破 MA20 停損。")
+    elif r['status'] == "空頭啟動": lines.append(f"\n  📉 建議：趨勢偏空，等待 RSI<{CONFIG['indicators']['rsi_oversold']} 且反彈跡象再短線試單。")
+    else:                            lines.append("\n  ⚖️  建議：方向不明，待帶量突破布林上軌後右側進場。")
 
     return "\n".join(lines)
 
@@ -764,6 +826,11 @@ def generate_group_html(group_name: str, results: list) -> str:
         if r.get('tdcc_date'):
             tdcc_1k_html += f"<br><span style='font-size:0.75em;color:#cfcfcf;font-weight:normal;'>{r['tdcc_date']}</span>"
 
+        etf_html = ""
+        # if r.get("etf_holdings"):
+        #     holds = "".join([f"<span style='background:#1e293b; color:#94a3b8; padding:2px 8px; border-radius:12px; font-size:0.85em; margin-right:6px;'>{h['name']} <span style='color:#cbd5e1'>{h['weight']}%</span></span>" for h in r["etf_holdings"]])
+        #     etf_html = f"<div style='padding: 10px 15px; margin: 10px 15px 0 15px; background: #0f172a; border-radius: 8px; border: 1px solid #1e293b;'>🧩 <b style='color:#94a3b8;'>ETF 前五大成分股：</b><div style='margin-top:8px;'>{holds}</div></div>"
+
         rows_html += f"""
         <tr class='data-row' onclick="toggleChart('{sid}')" ontouchend="toggleChart('{sid}')" style='cursor:pointer; -webkit-tap-highlight-color: transparent;'>
           <td style='font-weight:700;'>{medal} {sid} <span style='font-size:.75em;color:#60a5fa;'>▼</span></td>
@@ -790,6 +857,7 @@ def generate_group_html(group_name: str, results: list) -> str:
         </tr>
         <tr id='{chart_row_id}' style='display:none;'>
           <td colspan='21' style='padding:0;background:#131722;'>
+            {etf_html}
             <div id='{chart_div_id}' style='height:480px;'></div>
           </td>
         </tr>"""
@@ -1261,7 +1329,7 @@ def main():
         html_path = REPORT_DIR / f"{safe_name}_{TODAY_STR}.html"
         html_path.write_text(generate_group_html(group_name, results), encoding="utf-8")
         print(f"   🌐 HTML 儲存：{html_path}")
-        _tg_send(html_path, f"📊 【{group_name}】視覺化比較表 {TIMESTAMP_STR}", mime="text/html")
+        # _tg_send(html_path, f"📊 【{group_name}】視覺化比較表 {TIMESTAMP_STR}", mime="text/html")
 
         # ── 歷史報價 CSV TXT 報告 ───────────────────────────────
         quotes_txt_path = REPORT_DIR / f"{safe_name}_quotes_{TODAY_STR}.txt"

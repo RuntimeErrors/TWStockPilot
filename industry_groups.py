@@ -21,16 +21,37 @@
 # ============================================================
 
 INDUSTRY_GROUPS = {
-    "持股清單": {
+    "ETF": {
         "stocks": {
             "0050":  "元大台灣50",
+            "00631L": "元大台灣50正2",
+            "0056":  "元大高股息",
             "00878": "國泰永續高股息",
-            "2344":  "華邦電",
-            "00692": "富邦台50",
-            "2880":  "華南金",
-            "2330":  "台積電",
         },
-        # 持股清單為混合型，使用預設門檻（不設 overrides）
+        "config_overrides": {
+            "scoring": {
+                "fundamental": {
+                    # ETF 無營收毛利等基本面，將門檻降至極低避免影響評分
+                    "gross_margin_threshold": -999,
+                    "op_margin_threshold": -999,
+                    "rev_yoy_growth_score": 0,
+                    "rev_yoy_drop_score": 0,
+                    "eps_yoy_growth_score": 0,
+                    "eps_yoy_drop_score": 0,
+                },
+                "tech": {
+                    # ETF 走勢穩健，新高天數判斷可拉長
+                    "price_new_high_days": 120,
+                    "ma_bullish_score": 15,
+                    "ma_bearish_score": -20,
+                },
+                "institutional": {
+                    # 外資投信動向對權值 ETF 影響很大，略微調升
+                    "foreign_buy_score": 15,
+                    "it_buy_score": 15,
+                }
+            }
+        }
     },
 
     "AI與半導體": {
