@@ -1,17 +1,20 @@
 # 🚀 TWStockPilot - 台股量化分析導航員
 
-TWStockPilot 是一款專為台灣股市設計的量化分析工具，透過多因子評分模型（技術面、法籌面、基本面）深度解析個股強弱勢。系統支援 Telegram 自動化通知、CSV 數據匯出以及基於 TradingView 的互動式 HTML 視覺化報告。
+TWStockPilot 是一款專為台灣股市設計的量化分析工具，透過多因子評分模型（技術面、法籌面、基本面）深度解析個股與族群強弱勢。系統結合了宏觀經濟數據、自動化 CI/CD 排程以及專業級互動圖表，為投資決策提供數據支持。
 
 ---
 
 ## ✨ 核心特色
 
 - **📊 多因子量化分析**：整合技術指標（MA, MACD, RSI, ATR）、三大法人買賣超、融資融券變化及基本面營收 EPS。
-- **🥇 智能評分系統**：根據自定義權重對個股進行 0-100 分量化評分，快速識別市場格局（強勢多頭/震盪/空頭）。
-- **📡 Telegram 整合**：分析完成後自動發送圖文摘要報告與歷史數據檔至您的 Telegram 頻道。
-- **📈 互動式 HTML 報告**：生成專業級 K 線圖報告，內建 TradingView Lightweight Charts，支援離線查看與極致交互體驗。
-- **🔍 產業族群掃描**：一鍵分析特定產業族群（如 AI 伺服器、半導體），自動生成多股對照表與排行。
-- **⚙️ 高度可客製化**：透過 `config.json` 即可調整各項指標的加權分數與判斷門檻。
+- **🌐 全球局勢儀表板**：透過 `generate_portal.py` 自動抓取 FRED 與 Yahoo Finance 宏觀數據（通膨、美債利差、全球指數），快速掌握市場環境。
+- **🥇 智能評分系統**：根據自定義權重（`config.json`）對個股進行 0-100 分量化評分，快速識別市場格局（強勢多頭/震盪/空頭）。
+- **📡 自動化 CI/CD 排程**：
+    - **早盤預警 (08:00 Taipei Time)**：開盤前更新宏觀數據與最新報告。
+    - **盤後複盤 (17:15 Taipei Time)**：盤後資訊揭露後，第一時間完成全自動掃描與報告更新。
+- **📈 專業級互動報告**：採用 **TradingView Lightweight Charts** 打造極致流暢的 K 線圖視覺化體驗，支援離線查看。
+- **🔍 產業族群掃描**：一鍵分析特定產業族群（如 AI 伺服器、半導體），自動生成多股對照表與排行榜。
+- **📲 Telegram 即時推播**：分析完成後自動發送分析摘要與詳細歷史報價數據（CSV）至您的 Telegram。
 
 ---
 
@@ -33,8 +36,8 @@ pip install -r requirements.txt
 ```
 
 ### 3. 環境變數設定
-您可以建立一個 `.env` 檔案或直接在系統中設定以下變數：
-- `FINMIND_TOKEN`: [FinMind](https://finmindtrade.com/) API Token (強烈建議，否則會受速率限制)。
+您可以建立一個 `.env` 檔案或在系統中設定以下變數：
+- `FINMIND_TOKEN`: [FinMind](https://finmindtrade.com/) API Token (強烈建議，避免受限)。
 - `TG_BOT_TOKEN`: Telegram Bot Token。
 - `TG_CHAT_ID`: Telegram 接收訊息的 Chat ID。
 
@@ -43,48 +46,56 @@ pip install -r requirements.txt
 ## 🚀 快速開始
 
 ### 單股深度分析
-分析指定個股（例如 2330 台積電）並發送報告：
+分析指定個股並發送報告：
 ```bash
 export STOCK_ID=2330
 python main.py
 ```
 
-### 產業族群掃描
-執行 `industry_analyzer.py` 會根據 `industry_groups.py` 中定義的族群進行批次分析：
+### 產業族群批次分析
+執行 `industry_analyzer.py` 會根據 `industry_groups.py` 中定義的族群進行掃描：
 ```bash
 python industry_analyzer.py
 ```
-> 分析結果將存放在 `reports/` 目錄下（包含 HTML 與 TXT 報告）。
+
+### 生成門戶儀表板
+彙整所有報告並抓取最新宏觀數據：
+```bash
+python generate_portal.py
+```
+> 分析結果與儀表板將存放在 `reports/` 目錄下。
 
 ---
 
 ## ⚙️ 配置文件說明 (`config.json`)
 
-您可以透過修改 `config.json` 來微調系統的交易邏輯。
+您可以在 `config.json` 中自定義各項技術、籌碼、基本面指標的權重：
 
-| 分類 | 參數範例 | 說明 |
+| 指標類別 | 關鍵參數 | 說明 |
 | :--- | :--- | :--- |
 | **技術面** | `ma_bullish_score` | 均線多頭排列時加的分數 |
-| **法人面** | `foreign_buy_score` | 外資連買時加的分數 |
-| **籌碼面** | `tdcc_high_threshold` | 千張大戶持股比例門檻 |
+| **法人面** | `it_buy_score` | 投信連買時加的分數 |
+| **籌碼面** | `tdcc_high_threshold` | 千張大戶持股比例門檻 (TDCC) |
 | **基本面** | `rev_yoy_growth_score` | 營收年增率正向時加的分數 |
-| **門檻** | `strong_bull` | 判定為「強勢多頭」的總分下限 |
+| **格局判定** | `strong_bull` | 判定為「強勢多頭」的總分門檻 |
 
 ---
 
 ## 📁 專案結構
 
 - `main.py`: 單股分析核心腳本。
-- `industry_analyzer.py`: 產業/多股批次分析工具。
-- `industry_groups.py`: 定義個股族群分類。
-- `config.json`: 全域評分參數設定。
-- `reports/`: 存放生成的 HTML 互動圖表與文本報告。
+- `industry_analyzer.py`: 產業族群批次分析工具。
+- `industry_groups.py`: 定義各類股族群成分股。
+- `generate_portal.py`: 生成全球局勢儀表板與報告連結索引。
+- `config.json`: 全域量化指標權重與門檻設定。
+- `.github/workflows/`: 自動化 CI 排程工作流。
+- `reports/`: 存放生成的 HTML 互動圖表、TXT 報告與 `index.html` 門戶首頁。
 - `stock_data/` / `cache/`: 資料暫存快取。
 
 ---
 
 ## ⚖️ 免責聲明
-本專案僅供程式交易研究與量化分析學習參考，不構成任何形式的投資建議。投資人應獨立判斷並自負投資風險。
+本專案僅提供程式交易研究與量化分析學習之用，不構成任何形式的投資建議。市場有風險，投資需謹慎，請獨立判斷損益。
 
 ## 📄 開源協議
 本專案採用 [MIT License](LICENSE) 開源。
