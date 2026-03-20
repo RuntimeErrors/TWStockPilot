@@ -939,7 +939,7 @@ def generate_group_html(group_name: str, results: list) -> str:
     font-size: .88rem;
   }}
   tr.data-row:hover td {{ background: #1e2a45; }}
-  tr.data-row:active td {{ background: #1e2a45; }} /* 增加 active 狀態讓觸控有回饋 */
+  tr.data-row:active td {{ background: #2d3a5a !important; }}
   .legend {{
     margin-top: 18px;
     font-size: .8rem;
@@ -948,6 +948,16 @@ def generate_group_html(group_name: str, results: list) -> str:
   }}
   .legend span {{ display: flex; align-items: center; gap: 6px; }}
   .dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; }}
+
+  /* ── 手機/平板優化 ── */
+  @media (max-width: 768px) {{
+    body {{ padding: 12px; }}
+    h1 {{ font-size: 1.25rem; }}
+    .card {{ padding: 10px; min-width: 100px; flex: 1 1 120px; }}
+    .card .val {{ font-size: 1.2rem; }}
+    td, th {{ padding: 8px 10px; font-size: 0.82rem; }}
+    .summary-row {{ gap: 8px; }}
+  }}
 </style>
 </head>
 <body>
@@ -1005,25 +1015,21 @@ const chartsMap = {{}};
 
 // ── 切換走勢圖顯示 ──────────────────────────────────────────────
 function toggleChart(sid) {{
-  // 防抖動，避免觸控裝置同時觸發 ontouchend 與 onclick
-  if (window['_toggling_' + sid]) return;
-  window['_toggling_' + sid] = true;
-  setTimeout(() => window['_toggling_' + sid] = false, 300);
+  // 防止觸控裝置點擊穿透或重疊
+  const now = Date.now();
+  if (window._lastToggle && (now - window._lastToggle < 300)) return;
+  window._lastToggle = now;
 
   const row = document.getElementById('chart-row-' + sid);
   if (!row) return;
   const visible = row.style.display !== 'none';
   row.style.display = visible ? 'none' : 'table-row';
+  
   if (!visible) {{
     if (!rendered.has(sid)) {{
       rendered.add(sid);
-      // It's critical to wait for the browser to render the table row before initializing the chart
-      // otherwise container.clientWidth will be 0
-      setTimeout(() => {{
-        renderChart(sid);
-      }}, 50);
+      setTimeout(() => renderChart(sid), 50);
     }} else if (chartsMap[sid]) {{
-      // Force resize check if container has changed dimensions
       const container = document.getElementById('chart-' + sid);
       if (container) {{
          chartsMap[sid].applyOptions({{ width: container.clientWidth }});
@@ -1039,14 +1045,16 @@ function renderChart(sid) {{
   if (!data.length) return;
 
   const container = document.getElementById('chart-' + sid);
-  container.innerHTML = ''; // 清空
-  let initWidth = container.clientWidth;
-  if(initWidth === 0) initWidth = container.parentElement.clientWidth;
+  container.innerHTML = '';
+  let initWidth = container.clientWidth || container.parentElement.clientWidth;
+  
+  // 依螢幕寬度調整圖表高度 (手機版 320px, 桌機 480px)
+  const chartHeight = window.innerWidth < 768 ? 320 : 480;
+  container.style.height = chartHeight + 'px';
 
-  // 1. 初始化圖表
   const chart = LightweightCharts.createChart(container, {{
     width: initWidth,
-    height: 480,
+    height: chartHeight,
     layout: {{
       background: {{ type: 'solid', color: '#131722' }},
       textColor: '#9ca3af',
@@ -1058,8 +1066,16 @@ function renderChart(sid) {{
     crosshair: {{
       mode: LightweightCharts.CrosshairMode.Normal,
     }},
-    rightPriceScale: {{
-      borderColor: '#2d3250',
+    handleScroll: {{
+      mouseWheel: true,
+      pressedMouseMove: true,
+      horzTouchDrag: true,
+      vertTouchDrag: false, // 重要：允許在圖表上垂直滑動以捲動網頁
+    }},
+    handleScale: {{
+      axisPressedMouseMove: true,
+      mouseWheel: true,
+      pinch: true,
     }},
     timeScale: {{
       borderColor: '#2d3250',
@@ -1069,7 +1085,6 @@ function renderChart(sid) {{
   
   chartsMap[sid] = chart;
 
-  // 2. 加入 K線
   const mainSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {{
     upColor: '#ef5350',
     downColor: '#26a69a',
@@ -1078,7 +1093,6 @@ function renderChart(sid) {{
     wickDownColor: '#26a69a',
   }});
 
-  // TradingView 需要的資料結構: time, open, high, low, close
   const candleData = data.map(d => ({{
     time: d.date,
     open: d.open,
@@ -1088,11 +1102,10 @@ function renderChart(sid) {{
   }}));
   mainSeries.setData(candleData);
 
-  // 3. 加入成交量 (Histogram Overlay)
   const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {{
     color: '#26a69a',
     priceFormat: {{ type: 'volume' }},
-    priceScaleId: '', // 空字串代表不與主圖標尺共用
+    priceScaleId: '',
     scaleMargins: {{
       top: 0.8,
       bottom: 0,
@@ -1105,18 +1118,14 @@ function renderChart(sid) {{
   }}));
   volumeSeries.setData(volumeData);
 
-  // 4. 加入均線輔助函數
   const addLine = (key, color, lineWidth, lineStyle, title) => {{
     const series = chart.addSeries(LightweightCharts.LineSeries, {{
-      color,
-      lineWidth,
-      lineStyle,
-      title,
+      color, lineWidth, lineStyle, title,
       crosshairMarkerVisible: false,
       lastValueVisible: false,
       priceLineVisible: false
     }});
-    const lineData = data.filter(d => d[key] !== null && d[key] !== undefined).map(d => ({{
+    const lineData = data.filter(d => d[key] !== null).map(d => ({{
       time: d.date,
       value: d[key]
     }}));
@@ -1130,56 +1139,37 @@ function renderChart(sid) {{
   addLine('bb_upper', '#a78bfa', 1, LightweightCharts.LineStyle.Dotted, 'BB Upper');
   addLine('bb_lower', '#a78bfa', 1, LightweightCharts.LineStyle.Dotted, 'BB Lower');
 
-  // 5. 製作浮動提示框 (Legend / Tooltip)
   const legend = document.createElement('div');
-  legend.style.position = 'absolute';
-  legend.style.left = '12px';
-  legend.style.top = '12px';
-  legend.style.zIndex = 1;
-  legend.style.fontSize = '12px';
-  legend.style.fontFamily = 'monospace';
-  legend.style.lineHeight = '1.5';
-  legend.style.color = '#e4e6ea';
-  legend.style.pointerEvents = 'none';
+  Object.assign(legend.style, {{
+    position: 'absolute', left: '12px', top: '12px', zIndex: 1,
+    fontSize: '12px', fontFamily: 'monospace', color: '#e4e6ea', pointerEvents: 'none'
+  }});
   container.style.position = 'relative';
   container.appendChild(legend);
 
-  // 當滑鼠移動時更新提示框內的數據
   chart.subscribeCrosshairMove((param) => {{
     if (!param.time || param.point.x < 0 || param.point.x > container.clientWidth || param.point.y < 0 || param.point.y > container.clientHeight) {{
       legend.innerHTML = '';
       return;
     }}
-    
-    // 從回傳的 Map 中找到 K 線對應的數據
     const candleInfo = param.seriesData.get(mainSeries);
     if (candleInfo) {{
-      let htmlStr = `<div style="font-size: 14px; font-weight: bold; margin-bottom: 4px; color: #fff;">${{sid}} - ${{param.time}}</div>`;
-      htmlStr += `O: <span>${{candleInfo.open}}</span>  `;
-      htmlStr += `H: <span>${{candleInfo.high}}</span>  `;
-      htmlStr += `L: <span>${{candleInfo.low}}</span>  `;
-      htmlStr += `C: <span>${{candleInfo.close}}</span><br>`;
-
-      // 可以利用原本的 full data 來顯示均線等，如果要在 seriesData 收尋也可以
-      // 這裡直接取 index 去 data 裡找，對齊更簡單
       const index = data.findIndex(d => d.date === param.time);
-      if (index !== -1) {{
-        const fullNode = data[index];
-        htmlStr += `<span style="color:#f59e0b">MA5: ${{fullNode.ma5 || '-'}}</span> | `;
-        htmlStr += `<span style="color:#fb923c">MA10: ${{fullNode.ma10 || '-'}}</span> | `;
-        htmlStr += `<span style="color:#34d399">MA20: ${{fullNode.ma20 || '-'}}</span> | `;
-        htmlStr += `<span style="color:#60a5fa">MA60: ${{fullNode.ma60 || '-'}}</span>`;
-      }}
-      legend.innerHTML = htmlStr;
+      const fullNode = index !== -1 ? data[index] : {{}};
+      legend.innerHTML = `
+        <div style="font-size: 14px; font-weight: bold; margin-bottom: 4px; color: #fff;">${{sid}} - ${{param.time}}</div>
+        O: ${{candleInfo.open}} H: ${{candleInfo.high}} L: ${{candleInfo.low}} C: ${{candleInfo.close}}<br>
+        <span style="color:#f59e0b">MA5: ${{fullNode.ma5 || '-'}}</span> | 
+        <span style="color:#fb923c">MA10: ${{fullNode.ma10 || '-'}}</span> | 
+        <span style="color:#34d399">MA20: ${{fullNode.ma20 || '-'}}</span> | 
+        <span style="color:#60a5fa">MA60: ${{fullNode.ma60 || '-'}}</span>
+      `;
     }}
   }});
 
-  // 6. RWD 自適應大小
   new ResizeObserver(entries => {{
-    if (entries.length === 0 || entries[0].target !== container) return;
-    const newRect = entries[0].contentRect;
-    if (newRect.width > 0) {{
-      chart.applyOptions({{ width: newRect.width }});
+    if (entries[0] && entries[0].contentRect.width > 0) {{
+      chart.applyOptions({{ width: entries[0].contentRect.width }});
     }}
   }}).observe(container);
 
