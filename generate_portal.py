@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import requests
+import json
 
 # ==========================================
 # 1. Configuration & Initialization
@@ -14,7 +15,53 @@ report_dir = Path("reports")
 report_dir.mkdir(exist_ok=True)
 
 # ==========================================
-# 2. Market Data Fetching (via Yahoo Finance)
+# 2. Macro Data Fetching (FRED)
+# ==========================================
+def fetch_fred_data(series_id):
+    """
+    Fetches the latest value for a given FRED series ID.
+    Includes a local cache mechanism for robustness.
+    """
+    cache_dir = Path("cache")
+    cache_dir.mkdir(exist_ok=True)
+    cache_file = cache_dir / "macro_cache.json"
+    
+    cache = {}
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+        except:
+            pass
+
+    # Try fetching from FRED .txt link (lightweight)
+    url = f"https://fred.stlouisfed.org/data/{series_id}.txt"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            content = res.text.strip()
+            lines = content.split('\n')
+            for line in reversed(lines):
+                match = re.search(r'(\d{4}-\d{2}-\d{2})\s+([\d\.]+)', line)
+                if match:
+                    val = float(match.group(2))
+                    cache[series_id] = {"value": val, "date": match.group(1), "updated": datetime.now().isoformat()}
+                    cache_file.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+                    return val
+        else:
+            print(f"⚠️ FRED HTTP {res.status_code} for {series_id}")
+    except Exception as e:
+        print(f"⚠️ FRED fetch error for {series_id}: {e}")
+
+    # Fallback to cache
+    if series_id in cache:
+        print(f"ℹ️ Using cached value for {series_id} (from {cache[series_id]['date']})")
+        return cache[series_id]["value"]
+    
+    return None
+
+# ==========================================
+# 3. Market Data Fetching (via Yahoo Finance)
 # ==========================================
 def fetch_dashboard_data():
     categories = {
@@ -26,7 +73,7 @@ def fetch_dashboard_data():
             {"name": "道瓊工業", "id": "^DJI", "unit": "點"},
             {"name": "費城半導體", "id": "^SOX", "unit": "點"},
         ],
-        "匯率與加密資產": [
+        "貨幣與資產": [
             {"name": "美元兌台幣", "id": "TWD=X", "unit": "元"},
             {"name": "日圓兌台幣", "id": "JPYTWD=X", "unit": "元"},
             {"name": "比特幣", "id": "BTC-USD", "unit": "USD"},
@@ -34,16 +81,29 @@ def fetch_dashboard_data():
         ],
         "關鍵商品": [
             {"name": "WTI 原油", "id": "CL=F", "unit": "USD/桶"},
+            {"name": "布蘭特原油", "id": "BZ=F", "unit": "USD/桶"},
             {"name": "黃金", "id": "GC=F", "unit": "USD/盎司"},
             {"name": "白銀", "id": "SI=F", "unit": "USD/盎司"},
             {"name": "高階銅", "id": "HG=F", "unit": "USD/磅"},
         ],
-        "宏觀指標": [
-            {"name": "VIX 恐慌指數", "id": "^VIX", "unit": "點"},
-            {"name": "美元指數", "id": "DX-Y.NYB", "unit": "點"},
+        "利率與流動性": [
             {"name": "10Y. 美債", "id": "^TNX", "unit": "%"},
             {"name": "5Y. 美債", "id": "^FVX", "unit": "%"},
+        ],
+        "風險與情緒指標": [
+            {"name": "VIX 恐慌指數", "id": "^VIX", "unit": "點"},
+            {"name": "美元指數", "id": "DX-Y.NYB", "unit": "點"},
         ]
+    }
+    
+    # Pre-fetch Macro data from FRED
+    macro_data = {
+        "inflation_10y": fetch_fred_data("T10YIE"),
+        "spread_10y2y": fetch_fred_data("T10Y2Y"),
+        "high_yield_spread": fetch_fred_data("BAMLH0A0HYM2"),
+        "fed_funds": fetch_fred_data("FEDFUNDS"),
+        "m2": fetch_fred_data("WM2NS"),
+        "sentiment": fetch_fred_data("UMCSENT")
     }
     
     dashboard_results = {}
@@ -80,6 +140,34 @@ def fetch_dashboard_data():
             except Exception as e:
                 print(f"⚠️ Exception fetching {idx['name']}: {e}")
         dashboard_results[cat_name] = results
+        
+        # Inject calculated and fetched macro data into specific categories
+        if cat_name == "利率與流動性":
+            # 1. Yield Spread (10Y-2Y)
+            if macro_data["spread_10y2y"] is not None:
+                results.append({"name": "10Y-2Y 利差", "price": macro_data["spread_10y2y"], "change": 0, "change_pct": 0, "unit": "%"})
+            
+            # 2. Real Interest Rate
+            nominal_10y = next((x for x in results if x["name"] == "10Y. 美債"), None)
+            if nominal_10y and macro_data["inflation_10y"] is not None:
+                real_rate = nominal_10y["price"] - macro_data["inflation_10y"]
+                results.append({"name": "10Y. 實質利率", "price": real_rate, "change": 0, "change_pct": 0, "unit": "%"})
+                results.append({"name": "10Y. 預期通膨", "price": macro_data["inflation_10y"], "change": 0, "change_pct": 0, "unit": "%"})
+            
+            # 3. Fed Funds & M2
+            if macro_data["fed_funds"] is not None:
+                results.append({"name": "聯邦基金利率", "price": macro_data["fed_funds"], "change": 0, "change_pct": 0, "unit": "%"})
+            if macro_data["m2"] is not None:
+                results.append({"name": "M2 貨幣供給", "price": macro_data["m2"], "change": 0, "change_pct": 0, "unit": "B$"})
+
+        elif cat_name == "風險與情緒指標":
+            # 1. High Yield Spread
+            if macro_data["high_yield_spread"] is not None:
+                results.append({"name": "高收益債利差", "price": macro_data["high_yield_spread"], "change": 0, "change_pct": 0, "unit": "%"})
+            
+            # 2. Consumer Sentiment
+            if macro_data["sentiment"] is not None:
+                results.append({"name": "消費者信心", "price": macro_data["sentiment"], "change": 0, "change_pct": 0, "unit": "點"})
     
     return dashboard_results
 
