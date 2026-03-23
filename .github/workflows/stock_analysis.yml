@@ -4,8 +4,8 @@ on:
   schedule:
     # 09:15 UTC is 17:15 Taipei Time (確保當日盤後籌碼資料就緒，且避開 17:00 整點塞車)
     - cron: '15 9 * * 1-5'
-    # 00:00 UTC is 08:00 Taipei Time (平日開盤前更新)
-    - cron: '0 0 * * 1-5'
+    # 22:00 UTC is 06:00 Taipei Time (平日開盤前更新)
+    - cron: '0 22 * * 0-4'
   workflow_dispatch: # Allow manual trigger
   push:
     branches:
