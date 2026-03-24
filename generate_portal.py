@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import requests
 import json
+import concurrent.futures
 
 # ==========================================
 # 1. Configuration & Initialization
@@ -37,7 +38,7 @@ def fetch_fred_data(series_id):
     url = f"https://fred.stlouisfed.org/data/{series_id}.txt"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             content = res.text.strip()
             lines = content.split('\n')
@@ -97,76 +98,150 @@ def fetch_dashboard_data():
     }
     
     # Pre-fetch Macro data from FRED
-    macro_data = {
-        "inflation_10y": fetch_fred_data("T10YIE"),
-        "spread_10y2y": fetch_fred_data("T10Y2Y"),
-        "high_yield_spread": fetch_fred_data("BAMLH0A0HYM2"),
-        "fed_funds": fetch_fred_data("FEDFUNDS"),
-        "m2": fetch_fred_data("WM2NS"),
-        "sentiment": fetch_fred_data("UMCSENT")
+    fred_series = {
+        "inflation_10y": "T10YIE",
+        "spread_10y2y": "T10Y2Y",
+        "high_yield_spread": "BAMLH0A0HYM2",
+        "fed_funds": "FEDFUNDS",
+        "m2": "WM2NS",
+        "sentiment": "UMCSENT"
     }
+
+    macro_data = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        future_to_fred = {executor.submit(fetch_fred_data, sid): key for key, sid in fred_series.items()}
+        for future in concurrent.futures.as_completed(future_to_fred):
+            key = future_to_fred[future]
+            try:
+                macro_data[key] = future.result()
+            except Exception as e:
+                print(f"⚠️ FRED Exception for {key}: {e}")
+                macro_data[key] = None
     
-    dashboard_results = {}
+    dashboard_results = {cat: [] for cat in categories.keys()}
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    for cat_name, symbols in categories.items():
-        results = []
-        for idx in symbols:
+    def fetch_yahoo(idx):
+        try:
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{idx['id']}"
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if 'error' in data['chart'] and data['chart']['error']:
+                    print(f"⚠️ API Error for {idx['name']}: {data['chart']['error']}")
+                    return None
+                    
+                meta = data['chart']['result'][0]['meta']
+                price = float(meta['regularMarketPrice'])
+                prev_close = float(meta['chartPreviousClose'])
+                
+                change = price - prev_close
+                change_pct = (change / prev_close) * 100 if prev_close != 0 else 0
+                
+                return {
+                    "name": idx["name"],
+                    "price": price,
+                    "change": change,
+                    "change_pct": change_pct,
+                    "unit": idx["unit"]
+                }
+            else:
+                print(f"⚠️ Failed to fetch {idx['name']}: HTTP {res.status_code}")
+        except Exception as e:
+            print(f"⚠️ Exception fetching {idx['name']}: {e}")
+        return None
+
+    def fetch_taifex_night():
+        url = "https://mis.taifex.com.tw/futures/api/getQuoteList"
+        payload = {"MarketType":"1", "SymbolType":"F", "KindID":"1", "CID":"TXF"}
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("RtData", {}).get("QuoteList", [])
+                for item in items:
+                    price_str = item.get("CLastPrice", "").strip()
+                    ref_str = item.get("CRefPrice", "").strip()
+                    if price_str and ref_str:
+                        price = float(price_str)
+                        prev_close = float(ref_str)
+                        change = price - prev_close
+                        change_pct = (change / prev_close) * 100 if prev_close != 0 else 0
+                        return {
+                            "name": "台指期夜盤",
+                            "price": price,
+                            "change": change,
+                            "change_pct": change_pct,
+                            "unit": "點"
+                        }
+        except Exception as e:
+            print(f"⚠️ Exception fetching TAIFEX night futures: {e}")
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        future_taifex = executor.submit(fetch_taifex_night)
+        future_to_idx = {}
+        for cat_name, symbols in categories.items():
+            for idx in symbols:
+                future = executor.submit(fetch_yahoo, idx)
+                future_to_idx[future] = (cat_name, idx)
+                
+        for future in concurrent.futures.as_completed(future_to_idx):
+            cat_name, idx = future_to_idx[future]
             try:
-                url = f"https://query2.finance.yahoo.com/v8/finance/chart/{idx['id']}"
-                res = requests.get(url, headers=headers, timeout=10)
-                if res.status_code == 200:
-                    data = res.json()
-                    if 'error' in data['chart'] and data['chart']['error']:
-                        print(f"⚠️ API Error for {idx['name']}: {data['chart']['error']}")
-                        continue
-                        
-                    meta = data['chart']['result'][0]['meta']
-                    price = float(meta['regularMarketPrice'])
-                    prev_close = float(meta['chartPreviousClose'])
-                    
-                    change = price - prev_close
-                    change_pct = (change / prev_close) * 100
-                    
-                    results.append({
-                        "name": idx["name"],
-                        "price": price,
-                        "change": change,
-                        "change_pct": change_pct,
-                        "unit": idx["unit"]
-                    })
-                else:
-                    print(f"⚠️ Failed to fetch {idx['name']}: HTTP {res.status_code}")
+                result = future.result()
+                if result:
+                    dashboard_results[cat_name].append(result)
             except Exception as e:
-                print(f"⚠️ Exception fetching {idx['name']}: {e}")
-        dashboard_results[cat_name] = results
-        
-        # Inject calculated and fetched macro data into specific categories
+                print(f"⚠️ Exception processing {idx['name']}: {e}")
+
+    taifex_result = None
+    try:
+        taifex_result = future_taifex.result()
+    except Exception as e:
+        print(f"⚠️ Exception retrieving TAIFEX result: {e}")
+
+    # Reorder results to match original category lists
+    for cat_name, symbols in categories.items():
+        ordered_results = []
+        for idx in symbols:
+            found = next((r for r in dashboard_results[cat_name] if r["name"] == idx["name"]), None)
+            if found:
+                ordered_results.append(found)
+            # Insert Taiwan Night Market Futures right after "台股加權"
+            if cat_name == "主要指數" and idx["name"] == "台股加權" and taifex_result:
+                ordered_results.append(taifex_result)
+        dashboard_results[cat_name] = ordered_results
+
+    # Inject calculated and fetched macro data into specific categories
+    for cat_name in dashboard_results:
+        results = dashboard_results[cat_name]
         if cat_name == "利率與流動性":
             # 1. Yield Spread (10Y-2Y)
-            if macro_data["spread_10y2y"] is not None:
+            if macro_data.get("spread_10y2y") is not None:
                 results.append({"name": "10Y-2Y 利差", "price": macro_data["spread_10y2y"], "change": 0, "change_pct": 0, "unit": "%"})
             
             # 2. Real Interest Rate
             nominal_10y = next((x for x in results if x["name"] == "10Y. 美債"), None)
-            if nominal_10y and macro_data["inflation_10y"] is not None:
+            if nominal_10y and macro_data.get("inflation_10y") is not None:
                 real_rate = nominal_10y["price"] - macro_data["inflation_10y"]
                 results.append({"name": "10Y. 實質利率", "price": real_rate, "change": 0, "change_pct": 0, "unit": "%"})
                 results.append({"name": "10Y. 預期通膨", "price": macro_data["inflation_10y"], "change": 0, "change_pct": 0, "unit": "%"})
             
             # 3. Fed Funds & M2
-            if macro_data["fed_funds"] is not None:
+            if macro_data.get("fed_funds") is not None:
                 results.append({"name": "聯邦基金利率", "price": macro_data["fed_funds"], "change": 0, "change_pct": 0, "unit": "%"})
-            if macro_data["m2"] is not None:
+            if macro_data.get("m2") is not None:
                 results.append({"name": "M2 貨幣供給", "price": macro_data["m2"], "change": 0, "change_pct": 0, "unit": "B$"})
 
         elif cat_name == "風險與情緒指標":
             # 1. High Yield Spread
-            if macro_data["high_yield_spread"] is not None:
+            if macro_data.get("high_yield_spread") is not None:
                 results.append({"name": "高收益債利差", "price": macro_data["high_yield_spread"], "change": 0, "change_pct": 0, "unit": "%"})
             
             # 2. Consumer Sentiment
-            if macro_data["sentiment"] is not None:
+            if macro_data.get("sentiment") is not None:
                 results.append({"name": "消費者信心", "price": macro_data["sentiment"], "change": 0, "change_pct": 0, "unit": "點"})
     
     return dashboard_results
@@ -265,6 +340,69 @@ def generate_html():
         }}
         .updated span {{ color: #3fb950; font-weight: 600; }}
         
+        .refresh-btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 1.2rem;
+            margin-left: 0.8rem;
+            background: rgba(96, 165, 250, 0.12);
+            border: 1px solid rgba(96, 165, 250, 0.35);
+            border-radius: 20px;
+            padding: 0.4rem 1.2rem;
+            font-size: 0.85rem;
+            color: #60a5fa;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }}
+        .refresh-btn:hover {{ background: rgba(96, 165, 250, 0.22); border-color: #60a5fa; }}
+        .refresh-btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+        
+        .analyze-btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 1.2rem;
+            margin-left: 0.5rem;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.35);
+            border-radius: 20px;
+            padding: 0.4rem 1.2rem;
+            font-size: 0.85rem;
+            color: #fbd38d;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }}
+        .analyze-btn:hover {{ background: rgba(245, 158, 11, 0.22); border-color: #fbd38d; }}
+        .analyze-btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+        
+        /* 全螢幕 loading 遮罩 */
+        #loading-overlay {{
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(13, 17, 23, 0.82);
+            backdrop-filter: blur(4px);
+            z-index: 999;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            color: #e6edf3;
+            font-size: 1.1rem;
+        }}
+        #loading-overlay.show {{ display: flex; }}
+        .spinner {{
+            width: 40px; height: 40px;
+            border: 3px solid #30363d;
+            border-top-color: #60a5fa;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }}
+        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+        
         main {{ max-width: 1240px; margin: 0 auto; padding: 3rem 1.5rem; }}
         
         .section-header {{
@@ -349,11 +487,98 @@ def generate_html():
     </style>
 </head>
 <body>
+    <!-- 全螢幕 Loading 遮罩 -->
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <span>資料更新中，請稍候...</span>
+    </div>
+
     <header>
         <div class="logo">TW<span>Stock</span>Pilot</div>
         <p class="subtitle">全球局勢儀表板 · 宏觀經濟與族群量化分析</p>
-        <div class="updated">最後更新：<span>{now_str}</span></div>
+        <div>
+            <div class="updated">最後更新：<span>{now_str}</span></div>
+            <div id="refresh-actions" style="display: none; margin-top: 1rem;">
+                <button class="refresh-btn" id="refreshBtn" onclick="refreshData()">🔄 更新儀表板</button>
+                <button class="analyze-btn" id="analyzeBtn" onclick="analyzeIndustry()">📊 更新族群分析</button>
+            </div>
+        </div>
     </header>
+    
+    <script>
+    async function refreshData() {{
+        const btn = document.getElementById('refreshBtn');
+        const overlay = document.getElementById('loading-overlay');
+        const overlayText = overlay.querySelector('span');
+        
+        btn.disabled = true;
+        btn.textContent = '⏳ 更新中...';
+        overlayText.textContent = '資料更新中，請稍候...';
+        overlay.classList.add('show');
+        try {{
+            const res = await fetch('/api/refresh');
+            const data = await res.json();
+            if (res.ok) {{
+                location.reload();
+            }} else {{
+                alert('更新失敗：' + (data.message || '未知錯誤'));
+                btn.disabled = false;
+                btn.textContent = '🔄 更新儀表板';
+                overlay.classList.remove('show');
+            }}
+        }} catch (e) {{
+            alert('無法連線到本地伺服器，請確認伺服器已啟動。');
+            btn.disabled = false;
+            btn.textContent = '🔄 更新儀表板';
+            overlay.classList.remove('show');
+        }}
+    }}
+    
+    async function analyzeIndustry() {{
+        const btn = document.getElementById('analyzeBtn');
+        const overlay = document.getElementById('loading-overlay');
+        const overlayText = overlay.querySelector('span');
+        
+        btn.disabled = true;
+        btn.textContent = '⏳ 分析中...';
+        overlayText.textContent = '族群分析進行中（這可能需要數分鐘），請稍候...';
+        overlay.classList.add('show');
+        try {{
+            const res = await fetch('/api/analyze');
+            const data = await res.json();
+            if (res.ok) {{
+                location.reload();
+            }} else {{
+                alert('分析失敗：' + (data.message || '未知錯誤'));
+                btn.disabled = false;
+                btn.textContent = '📊 更新族群分析';
+                overlay.classList.remove('show');
+            }}
+        }} catch (e) {{
+            alert('無法連線到本地伺服器，請確認伺服器已啟動。');
+            btn.disabled = false;
+            btn.textContent = '📊 更新族群分析';
+            overlay.classList.remove('show');
+        }}
+    }}
+    
+    // 只有在本地伺服器環境下，才顯示更新按鈕並啟用自動刷新
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {{
+        document.getElementById('refresh-actions').style.display = 'block';
+        
+        // 背景每 5 分鐘自動刷新儀表板（不顯示全螢幕遮罩）
+        setInterval(async () => {{
+            try {{
+                const res = await fetch('/api/refresh');
+                if (res.ok) {{
+                    location.reload();
+                }}
+            }} catch (e) {{
+                console.log('Auto refresh failed');
+            }}
+        }}, 5 * 60 * 1000); // 5 minutes
+    }}
+    </script>
     <main>
         {dashboard_html}
 
