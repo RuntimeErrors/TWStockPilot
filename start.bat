@@ -42,9 +42,9 @@ echo.
 for /f "tokens=*" %%i in ('python --version') do echo Python 版本：%%i
 
 REM ── 3. 建立虛擬環境（若尚未建立）──────────────────────────────────
-if not exist ".venv\" (
+if not exist ".venv" (
     echo.
-    echo 建立 Python 虛擬環境 (.venv)...
+    echo 建立 Python 虛擬環境 .venv ...
     python -m venv .venv
     echo 虛擬環境建立完成
 )

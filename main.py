@@ -250,7 +250,7 @@ print(report_text)
 # ==========================================
 # 6. Send to Telegram
 # ==========================================
-if tg_bot_token and tg_chat_id:
+if False: # tg_bot_token and tg_chat_id: (PAUSED BY REQUEST)
     print("📤 Sending report to Telegram...")
     print(f"   → chat_id: {tg_chat_id}")
     tg_url = f"https://api.telegram.org/bot{tg_bot_token}/sendMessage"

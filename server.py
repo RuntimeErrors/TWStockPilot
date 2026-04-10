@@ -48,6 +48,7 @@ def run_generate_portal() -> tuple[bool, str]:
             [sys.executable, str(PROJECT_DIR / "generate_portal.py")],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(PROJECT_DIR),
             timeout=120,
         )
@@ -76,6 +77,7 @@ def run_industry_analyzer() -> tuple[bool, str]:
             [sys.executable, str(PROJECT_DIR / "industry_analyzer.py")],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(PROJECT_DIR),
             timeout=600, # 族群分析需要較長的時間
         )
@@ -84,6 +86,8 @@ def run_industry_analyzer() -> tuple[bool, str]:
             subprocess.run(
                 [sys.executable, str(PROJECT_DIR / "generate_portal.py")],
                 capture_output=True,
+                text=True,
+                encoding="utf-8",
                 cwd=str(PROJECT_DIR),
                 timeout=120,
             )
@@ -108,7 +112,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         # 過濾靜態資源的雜訊 log
-        if any(ext in args[0] for ext in [".js", ".css", ".png", ".ico"]):
+        path = getattr(self, "path", "")
+        if any(path.endswith(ext) for ext in [".js", ".css", ".png", ".ico", ".woff", ".woff2"]):
             return
         super().log_message(format, *args)
 

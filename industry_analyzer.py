@@ -1224,6 +1224,9 @@ def generate_group_quotes_text(results: list) -> str:
 # 9. Telegram 傳送（sendDocument）
 # ============================================================
 def _tg_send(file_path: Path, caption: str, mime: str = "text/plain") -> bool:
+    print(f"   ⏸️  Telegram 傳送已暫停 (PAUSED BY REQUEST)：{file_path.name}")
+    return False
+    # Original logic below:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("   ⚠️  未設定 Telegram 環境變數，跳過傳送。")
         return False
@@ -1244,6 +1247,9 @@ def _tg_send(file_path: Path, caption: str, mime: str = "text/plain") -> bool:
 
 def _tg_msg(text: str) -> bool:
     """透過 Telegram sendMessage 傳送純文字訊息。"""
+    print(f"   ⏸️  Telegram 訊息已暫停 (PAUSED BY REQUEST)")
+    return False
+    # Original logic below:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return False
     url  = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
