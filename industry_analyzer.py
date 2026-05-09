@@ -407,6 +407,10 @@ def analyze_single_stock(stock_id: str, stock_name: str,
         resistances = dp['High'].iloc[local_max].tail(2).values
         supports    = dp['Low'].iloc[local_min].tail(2).values
 
+        # 短期動能漲幅 (5日與20日)
+        dp['Momentum_5d']  = dp['Close'].pct_change(periods=5) * 100
+        dp['Momentum_20d'] = dp['Close'].pct_change(periods=20) * 100
+
         last = dp.iloc[-1]
 
         # ── 法人清洗 ──────────────────────────────────────────
@@ -543,6 +547,15 @@ def analyze_single_stock(stock_id: str, stock_name: str,
                 score += c_score["tech"]["price_new_high_score"]
                 price_is_new_high = True
 
+        # ★ 短期動能評分
+        mom_5d_th = c_score["tech"].get("momentum_5d_threshold", 8)
+        if last['Momentum_5d'] > mom_5d_th:
+            score += c_score["tech"].get("momentum_5d_score", 10)
+            
+        mom_20d_th = c_score["tech"].get("momentum_20d_threshold", 15)
+        if last['Momentum_20d'] > mom_20d_th:
+            score += c_score["tech"].get("momentum_20d_score", 15)
+
         # 【法人面】
         # 投信
         score += c_score["institutional"]["it_buy_score"] if it_5d > 0 else c_score["institutional"]["it_sell_score"]
@@ -644,6 +657,8 @@ def analyze_single_stock(stock_id: str, stock_name: str,
                                if _r(last['ATR14']) else None,
             "macd_cross":     bool(last['MACD_Hist'] > 0 and dp['MACD_Hist'].iloc[-2] <= 0),
             "price_is_new_high": price_is_new_high,          # ★ N日新高
+            "momentum_5d":    _r(last['Momentum_5d'], 1),
+            "momentum_20d":   _r(last['Momentum_20d'], 1),
             # 法人
             "fi_5d": round(fi_5d / 1000, 1),
             "it_5d": round(it_5d / 1000, 1),
@@ -703,6 +718,7 @@ def generate_stock_text(r: dict) -> str:
         f"  MACD：{'🔔 黃金交叉翻多' if r.get('macd_cross') else str(r['macd_hist'])}",
         f"  量比（vs 5MA）：{r['volume_ratio']}x"
         + ("  📈 股價創60日新高" if r.get('price_is_new_high') else ""),
+        f"  近期動能：5日漲幅 {r.get('momentum_5d', 'N/A')}% ｜ 20日漲幅 {r.get('momentum_20d', 'N/A')}%",
         f"  布林通道：上軌 {r['bb_upper']}  下軌 {r['bb_lower']}",
         f"  近期壓力：{r['resistance'] or 'N/A'}  近期支撐：{r['support'] or 'N/A'}",
         f"  建議停損：{r['stop_loss'] or 'N/A'}（-{CONFIG['indicators']['stop_loss_atr_multiple']} ATR）",
@@ -751,9 +767,15 @@ def generate_group_report(group_name: str, results: list) -> str:
         lines.append("")
 
         avg = round(sum(r['score'] for r in valid) / len(valid), 1)
+        valid_mom_5d = [r['momentum_5d'] for r in valid if r.get('momentum_5d') is not None]
+        valid_mom_20d = [r['momentum_20d'] for r in valid if r.get('momentum_20d') is not None]
+        avg_mom_5d = round(sum(valid_mom_5d) / len(valid_mom_5d), 1) if valid_mom_5d else 0.0
+        avg_mom_20d = round(sum(valid_mom_20d) / len(valid_mom_20d), 1) if valid_mom_20d else 0.0
+        
         bull = sum(1 for r in valid if r['status'] in ("強勢多頭", "震盪偏多"))
         bear = sum(1 for r in valid if r['status'] == "空頭啟動")
         lines += ["【族群整體訊號】",
+                  f"  族群動能：5日平均漲幅 {avg_mom_5d}% ｜ 20日平均漲幅 {avg_mom_20d}%",
                   f"  平均評分：{avg}/100",
                   f"  偏多：{bull} 支  偏空：{bear} 支  中性：{len(valid)-bull-bear} 支", ""]
 
@@ -843,6 +865,8 @@ def generate_group_html(group_name: str, results: list) -> str:
           <td style='text-align:right;{_rsi_color(r["rsi14"])}'>{_na(r['rsi14'])}</td>
           <td style='text-align:right;'>{macd_str}</td>
           <td style='text-align:right;'>{vr_str}</td>
+          <td style='text-align:right;{_yoy_color(r.get("momentum_5d"))}'>{_na(r.get("momentum_5d"), '%')}</td>
+          <td style='text-align:right;{_yoy_color(r.get("momentum_20d"))}'>{_na(r.get("momentum_20d"), '%')}</td>
           <td style='text-align:right;{_yoy_color(r["rev_yoy"])}'>{_na(r['rev_yoy'], '%')}</td>
           <td style='text-align:right;'>{_na(r['eps'])}</td>
           <td style='text-align:right;'>{_na(r['gross_margin'], '%')}</td>
@@ -967,16 +991,21 @@ def generate_group_html(group_name: str, results: list) -> str:
 
     if valid:
         avg_sc = round(sum(r['score'] for r in valid) / len(valid), 1)
+        valid_mom_5d = [r['momentum_5d'] for r in valid if r.get('momentum_5d') is not None]
+        avg_mom_5d = round(sum(valid_mom_5d) / len(valid_mom_5d), 1) if valid_mom_5d else 0.0
+        
         bull   = sum(1 for r in valid if r['status'] in ("強勢多頭", "震盪偏多"))
         bear   = sum(1 for r in valid if r['status'] == "空頭啟動")
         top    = ranked[0] if ranked else None
         top_str= f"{top['stock_id']} {top['stock_name']} ({top['score']})" if top else "—"
         avg_cls = "green" if avg_sc >= 65 else ("yellow" if avg_sc >= 50 else "red")
+        mom_cls = "green" if avg_mom_5d > 0 else "red"
+        
         html += f"""<div class="summary-row">
+  <div class="card"><div class="val {mom_cls}">{avg_mom_5d}%</div><div class="lbl">族群5日平均漲幅</div></div>
   <div class="card"><div class="val {avg_cls}">{avg_sc}</div><div class="lbl">族群平均評分</div></div>
   <div class="card"><div class="val green">{bull}</div><div class="lbl">偏多個股</div></div>
   <div class="card"><div class="val red">{bear}</div><div class="lbl">偏空個股</div></div>
-  <div class="card"><div class="val blue">{len(valid)-bull-bear}</div><div class="lbl">中性個股</div></div>
   <div class="card" style="min-width:200px"><div class="val green" style="font-size:1rem;">{top_str}</div><div class="lbl">族群領頭羊</div></div>
 </div>"""
 
@@ -988,6 +1017,7 @@ def generate_group_html(group_name: str, results: list) -> str:
   <th>評分</th><th>格局</th>
   <th>收盤</th><th>MA20</th><th>MA60</th>
   <th>RSI</th><th>MACD</th><th>量比</th>
+  <th>5日動能</th><th>20日動能</th>
   <th>營收YoY</th><th>EPS</th><th>毛利率</th><th>營益率</th>
   <th>P/E</th><th>P/B</th><th>投信5日</th><th>外資5日</th><th>融資增減</th><th>券資比</th><th>千張大戶</th>
 </tr>
@@ -1224,9 +1254,6 @@ def generate_group_quotes_text(results: list) -> str:
 # 9. Telegram 傳送（sendDocument）
 # ============================================================
 def _tg_send(file_path: Path, caption: str, mime: str = "text/plain") -> bool:
-    print(f"   ⏸️  Telegram 傳送已暫停 (PAUSED BY REQUEST)：{file_path.name}")
-    return False
-    # Original logic below:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("   ⚠️  未設定 Telegram 環境變數，跳過傳送。")
         return False
@@ -1247,9 +1274,6 @@ def _tg_send(file_path: Path, caption: str, mime: str = "text/plain") -> bool:
 
 def _tg_msg(text: str) -> bool:
     """透過 Telegram sendMessage 傳送純文字訊息。"""
-    print(f"   ⏸️  Telegram 訊息已暫停 (PAUSED BY REQUEST)")
-    return False
-    # Original logic below:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return False
     url  = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
@@ -1337,6 +1361,8 @@ def main():
     print(f"  ✅ 所有族群分析完成！")
     print(f"  報告目錄：{REPORT_DIR.resolve()}")
     print(f"{'='*60}\n")
+    
+    _tg_msg("https://runtimeerrors.github.io/TWStockPilot/")
 
 
 if __name__ == "__main__":

@@ -9,9 +9,9 @@
             "//_ma_bearish": "均線空頭排列扣分：收盤價 < 月線(MA20) < 季線(MA60)",
             "ma_bearish_score": -15,
             "//_macd_cross": "MACD黃金交叉加分：柱狀圖(MACD_Hist)由負轉正",
-            "macd_cross_score": 10,
+            "macd_cross_score": 0,
             "//_macd_bear": "MACD偏弱扣分：柱狀圖(MACD_Hist)小於0",
-            "macd_bear_score": -5,
+            "macd_bear_score": -2,
             "//_vol_breakout_mult": "帶量突破倍數門檻：單日成交量需達到 5日均量 的多少倍才算突破",
             "volume_breakout_multiplier": 1.5,
             "//_vol_breakout_score": "帶量突破加分：滿足成交量倍數門檻，且當日收紅(收>開)時所加的分數",
@@ -19,7 +19,15 @@
             "//_price_new_high_days": "股價N日新高區間：股價創近N日高點視為強勢突破",
             "price_new_high_days": 60,
             "//_price_new_high_score": "股價N日新高加分",
-            "price_new_high_score": 5
+            "price_new_high_score": 15,
+            "//_momentum_5d_th": "5日漲幅門檻(%)：短期爆發力",
+            "momentum_5d_threshold": 8,
+            "//_momentum_5d_sc": "5日漲幅達標加分",
+            "momentum_5d_score": 10,
+            "//_momentum_20d_th": "20日漲幅門檻(%)：波段延續力",
+            "momentum_20d_threshold": 15,
+            "//_momentum_20d_sc": "20日漲幅達標加分",
+            "momentum_20d_score": 15
         },
         "institutional": {
             "//_inst_note": "【法人籌碼面評分設定】",

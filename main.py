@@ -250,7 +250,7 @@ print(report_text)
 # ==========================================
 # 6. Send to Telegram
 # ==========================================
-if False: # tg_bot_token and tg_chat_id: (PAUSED BY REQUEST)
+if tg_bot_token and tg_chat_id:
     print("📤 Sending report to Telegram...")
     print(f"   → chat_id: {tg_chat_id}")
     tg_url = f"https://api.telegram.org/bot{tg_bot_token}/sendMessage"
@@ -319,6 +319,13 @@ if False: # tg_bot_token and tg_chat_id: (PAUSED BY REQUEST)
             else:
                 print(f"❌ Failed to send Telegram historical quotes.")
                 print(f"   Response: {doc_resp.text}")
+
+        # 發送指定網址做為最後一個訊息
+        url_payload = {
+            "chat_id": tg_chat_id,
+            "text": "https://runtimeerrors.github.io/TWStockPilot/"
+        }
+        requests.post(tg_url, json=url_payload, timeout=30)
 
     except Exception as e:
         print(f"❌ Exception occurred while sending Telegram message: {e}")
