@@ -38,11 +38,35 @@ def fetch_fred_data(series_id):
         except:
             pass
 
-    # Try fetching from FRED .txt link (lightweight)
+    # 1. Try FRED API if API key is provided
+    api_key = os.environ.get("FRED_API_KEY")
+    if api_key:
+        api_url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={api_key}&file_type=json&sort_order=desc&limit=1"
+        try:
+            res = requests.get(api_url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                observations = data.get("observations", [])
+                if observations:
+                    obs = observations[0]
+                    val_str = obs.get("value", "")
+                    if val_str != "." and val_str != "":
+                        val = float(val_str)
+                        cache[series_id] = {"value": val, "date": obs.get("date"), "updated": datetime.now().isoformat()}
+                        cache_file.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+                        return val
+        except Exception as e:
+            print(f"⚠️ FRED API error for {series_id}: {e}")
+
+    # 2. Try fetching from FRED .txt link (lightweight scraping)
     url = f"https://fred.stlouisfed.org/data/{series_id}.txt"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+    }
     try:
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=15)
         if res.status_code == 200:
             content = res.text.strip()
             lines = content.split('\n')
@@ -58,7 +82,7 @@ def fetch_fred_data(series_id):
     except Exception as e:
         print(f"⚠️ FRED fetch error for {series_id}: {e}")
 
-    # Fallback to cache
+    # 3. Fallback to cache
     if series_id in cache:
         print(f"ℹ️ Using cached value for {series_id} (from {cache[series_id]['date']})")
         return cache[series_id]["value"]
@@ -157,7 +181,7 @@ def fetch_dashboard_data():
 
     def fetch_taifex_night():
         url = "https://mis.taifex.com.tw/futures/api/getQuoteList"
-        payload = {"MarketType":"1", "SymbolType":"F", "KindID":"1", "CID":"TXF"}
+        payload = {"MarketType":"0", "SymbolType":"F", "KindID":"1", "CID":"TXF"}
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
             res = requests.post(url, json=payload, headers=headers, timeout=5)
@@ -165,6 +189,9 @@ def fetch_dashboard_data():
                 data = res.json()
                 items = data.get("RtData", {}).get("QuoteList", [])
                 for item in items:
+                    # Skip spot index
+                    if item.get("SymbolID", "") == "TXF-S" or item.get("SymbolID", "") == "TXF-P":
+                        continue
                     price_str = item.get("CLastPrice", "").strip()
                     ref_str = item.get("CRefPrice", "").strip()
                     if price_str and ref_str:
