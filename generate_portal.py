@@ -180,6 +180,7 @@ def fetch_dashboard_data():
         return None
 
     def fetch_taifex_night():
+        # 1. Try official TAIFEX first
         url = "https://mis.taifex.com.tw/futures/api/getQuoteList"
         payload = {"MarketType":"0", "SymbolType":"F", "KindID":"1", "CID":"TXF"}
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -208,6 +209,42 @@ def fetch_dashboard_data():
                         }
         except Exception as e:
             print(f"⚠️ Exception fetching TAIFEX night futures: {e}")
+
+        # 2. Fallback to HiStock (which works on GitHub Actions since it doesn't block cloud IPs)
+        print("ℹ️ TAIFEX blocked or failed. Trying fallback to HiStock...")
+        for symbol in ["FITXP", "FITX"]:
+            url = f"https://histock.tw/index/{symbol}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    html = res.text
+                    p_m = re.search(r'id="Price1_lbTPrice"[^>]*><span[^>]*>([\d\.]+)</span>', html)
+                    c_m = re.search(r'id="Price1_lbTChange"[^>]*><span[^>]*>([^<]+)</span>', html)
+                    pct_m = re.search(r'id="Price1_lbTPercent"[^>]*><span[^>]*>([^<]+)</span>', html)
+                    
+                    if p_m:
+                        price = float(p_m.group(1))
+                        change_str = c_m.group(1).replace('▲', '+').replace('▼', '-').replace(' ', '').strip() if c_m else '0'
+                        percent_str = pct_m.group(1).replace('%', '').strip() if pct_m else '0'
+                        
+                        change = float(change_str)
+                        change_pct = float(percent_str)
+                        
+                        if price > 0:
+                            print(f"✅ Successfully fetched Taiwan futures ({symbol}) from HiStock: {price}")
+                            return {
+                                "name": "台指期夜盤",
+                                "price": price,
+                                "change": change,
+                                "change_pct": change_pct,
+                                "unit": "點"
+                            }
+            except Exception as e:
+                print(f"⚠️ Exception fetching HiStock {symbol}: {e}")
+        
         return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
