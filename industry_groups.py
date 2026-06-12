@@ -24,7 +24,6 @@ INDUSTRY_GROUPS = {
     "ETF": {
         "stocks": {
             "0050":  "元大台灣50",
-            "00631L": "元大台灣50正2",
             "0056":  "元大高股息",
             "00878": "國泰永續高股息",
         },
@@ -49,6 +48,47 @@ INDUSTRY_GROUPS = {
                     # 外資投信動向對權值 ETF 影響很大，略微調升
                     "foreign_buy_score": 15,
                     "it_buy_score": 15,
+                }
+            }
+        }
+    },
+
+    "Leveraged_ETF": {
+        "stocks": {
+            "00631L": "元大台灣50正2",
+        },
+        "config_overrides": {
+            "scoring": {
+                "fundamental": {
+                    "gross_margin_threshold": -999,
+                    "op_margin_threshold": -999,
+                    "rev_yoy_growth_score": 0,
+                    "rev_yoy_drop_score": 0,
+                    "eps_yoy_growth_score": 0,
+                    "eps_yoy_drop_score": 0,
+                    "gross_margin_score": 0,
+                    "op_margin_score": 0
+                },
+                "chip": {
+                    "tdcc_high_score": 0,
+                    "tdcc_mid_score": 0,
+                    "tdcc_low_score": 0
+                },
+                "margin": {
+                    "margin_drop_score": 0,
+                    "margin_surge_score": 0,
+                    "short_ratio_score": 0
+                },
+                "tech": {
+                    "ma_bullish_score": 30,
+                    "ma_bearish_score": -30,
+                    "macd_cross_score": 15,
+                    "momentum_5d_score": 15,
+                    "momentum_20d_score": 20
+                },
+                "institutional": {
+                    "foreign_buy_score": 20,
+                    "foreign_sell_score": -15
                 }
             }
         }
