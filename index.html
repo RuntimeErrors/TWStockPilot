@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TWStockPilot — 全球局勢儀表板</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', -apple-system, system-ui, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+        header {
+            background: linear-gradient(135deg, #1a2236 0%, #0d1117 100%);
+            border-bottom: 1px solid #21262d;
+            padding: 3rem 1.5rem 2.5rem;
+            text-align: center;
+        }
+        .logo { font-size: 2.8rem; font-weight: 700; letter-spacing: -1.5px; margin-bottom: 0.5rem; }
+        .logo span { color: #60a5fa; }
+        .subtitle { color: #8b949e; font-size: 1.1rem; }
+        .updated {
+            display: inline-block;
+            margin-top: 1.5rem;
+            background: rgba(48, 54, 61, 0.4);
+            border: 1px solid #30363d;
+            border-radius: 20px;
+            padding: 0.4rem 1.2rem;
+            font-size: 0.85rem;
+            color: #8b949e;
+        }
+        .updated span { color: #3fb950; font-weight: 600; }
+        
+        .refresh-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 1.2rem;
+            margin-left: 0.8rem;
+            background: rgba(96, 165, 250, 0.12);
+            border: 1px solid rgba(96, 165, 250, 0.35);
+            border-radius: 20px;
+            padding: 0.4rem 1.2rem;
+            font-size: 0.85rem;
+            color: #60a5fa;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        .refresh-btn:hover { background: rgba(96, 165, 250, 0.22); border-color: #60a5fa; }
+        .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .analyze-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 1.2rem;
+            margin-left: 0.5rem;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.35);
+            border-radius: 20px;
+            padding: 0.4rem 1.2rem;
+            font-size: 0.85rem;
+            color: #fbd38d;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        .analyze-btn:hover { background: rgba(245, 158, 11, 0.22); border-color: #fbd38d; }
+        .analyze-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        /* 全螢幕 loading 遮罩 */
+        #loading-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(13, 17, 23, 0.82);
+            backdrop-filter: blur(4px);
+            z-index: 999;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            color: #e6edf3;
+            font-size: 1.1rem;
+        }
+        #loading-overlay.show { display: flex; }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 3px solid #30363d;
+            border-top-color: #60a5fa;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        main { max-width: 1240px; margin: 0 auto; padding: 3rem 1.5rem; }
+        
+        .section-header {
+            display: flex;
+            align-items: center;
+            margin: 2rem 0 1.2rem;
+            padding-bottom: 0.8rem;
+            border-bottom: 1px solid #21262d;
+        }
+        .section-header:first-child { margin-top: 0; }
+        .section-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #f0f6fc;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        
+        .index-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 1.2rem;
+        }
+        .index-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 1.5rem;
+            text-align: center;
+            transition: all 0.2s;
+        }
+        .index-card:hover { transform: translateY(-3px); border-color: #444c56; background: #1c2128; }
+        .index-name { font-size: 0.85rem; color: #8b949e; font-weight: 600; margin-bottom: 0.5rem; }
+        .index-price { font-size: 1.5rem; font-weight: 700; color: #f0f6fc; margin-bottom: 0.3rem; }
+        .index-price .unit { font-size: 0.85rem; font-weight: 400; color: #8b949e; margin-left: 4px; }
+        .index-change { font-size: 0.9rem; font-weight: 600; }
+
+        .report-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 1.2rem;
+        }
+        .card {
+            display: flex;
+            flex-direction: column;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 1.8rem;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .card:hover {
+            border-color: #60a5fa;
+            transform: translateY(-4px);
+            background: #1c2128;
+            box-shadow: 0 12px 24px rgba(0,0,0,0.3);
+        }
+        .card-icon { font-size: 2.2rem; margin-bottom: 1rem; }
+        .card-title { font-size: 1.3rem; font-weight: 700; color: #f0f6fc; margin-bottom: 0.6rem; }
+        .card-date { font-size: 0.9rem; color: #8b949e; }
+        
+        .no-report { color: #8b949e; text-align: center; padding: 4rem; font-style: italic; }
+        
+        footer {
+            text-align: center;
+            padding: 4rem 1.5rem;
+            color: #484f58;
+            font-size: 0.9rem;
+            border-top: 1px solid #21262d;
+            margin-top: 4rem;
+        }
+        
+        @media (max-width: 768px) {
+            .logo { font-size: 2.2rem; }
+            header { padding: 2.5rem 1.2rem; }
+            .index-grid { grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+            .index-price { font-size: 1.2rem; }
+            .card { padding: 1.4rem; }
+        }
+    </style>
+</head>
+<body>
+    <!-- 全螢幕 Loading 遮罩 -->
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <span>資料更新中，請稍候...</span>
+    </div>
+
+    <header>
+        <div class="logo">TW<span>Stock</span>Pilot</div>
+        <p class="subtitle">全球局勢儀表板 · 宏觀經濟與族群量化分析</p>
+        <div>
+            <div class="updated">最後更新：<span>2026-09-04 21:30 (UTC+8)</span></div>
+            <div id="refresh-actions" style="display: none; margin-top: 1rem;">
+                <button class="refresh-btn" id="refreshBtn" onclick="refreshData()">🔄 更新儀表板</button>
+                <button class="analyze-btn" id="analyzeBtn" onclick="analyzeIndustry()">📊 更新族群分析</button>
+            </div>
+        </div>
+    </header>
+    
+    <script>
+    async function refreshData() {
+        const btn = document.getElementById('refreshBtn');
+        const overlay = document.getElementById('loading-overlay');
+        const overlayText = overlay.querySelector('span');
+        
+        btn.disabled = true;
+        btn.textContent = '⏳ 更新中...';
+        overlayText.textContent = '資料更新中，請稍候...';
+        overlay.classList.add('show');
+        try {
+            const res = await fetch('/api/refresh');
+            const data = await res.json();
+            if (res.ok) {
+                location.reload();
+            } else {
+                alert('更新失敗：' + (data.message || '未知錯誤'));
+                btn.disabled = false;
+                btn.textContent = '🔄 更新儀表板';
+                overlay.classList.remove('show');
+            }
+        } catch (e) {
+            alert('無法連線到本地伺服器，請確認伺服器已啟動。');
+            btn.disabled = false;
+            btn.textContent = '🔄 更新儀表板';
+            overlay.classList.remove('show');
+        }
+    }
+    
+    async function analyzeIndustry() {
+        const btn = document.getElementById('analyzeBtn');
+        const overlay = document.getElementById('loading-overlay');
+        const overlayText = overlay.querySelector('span');
+        
+        btn.disabled = true;
+        btn.textContent = '⏳ 分析中...';
+        overlayText.textContent = '族群分析進行中（這可能需要數分鐘），請稍候...';
+        overlay.classList.add('show');
+        try {
+            const res = await fetch('/api/analyze');
+            const data = await res.json();
+            if (res.ok) {
+                location.reload();
+            } else {
+                alert('分析失敗：' + (data.message || '未知錯誤'));
+                btn.disabled = false;
+                btn.textContent = '📊 更新族群分析';
+                overlay.classList.remove('show');
+            }
+        } catch (e) {
+            alert('無法連線到本地伺服器，請確認伺服器已啟動。');
+            btn.disabled = false;
+            btn.textContent = '📊 更新族群分析';
+            overlay.classList.remove('show');
+        }
+    }
+    
+    // 只有在本地伺服器環境下，才顯示更新按鈕並啟用自動刷新
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        document.getElementById('refresh-actions').style.display = 'block';
+        
+        // 背景每 5 分鐘自動刷新儀表板（不顯示全螢幕遮罩）
+        setInterval(async () => {
+            try {
+                const res = await fetch('/api/refresh');
+                if (res.ok) {
+                    location.reload();
+                }
+            } catch (e) {
+                console.log('Auto refresh failed');
+            }
+        }, 5 * 60 * 1000); // 5 minutes
+    }
+    </script>
+    <main>
+        
+        <div class="section-header">
+            <span class="section-title">主要指數</span>
+        </div>
+        <div class="index-grid">
+            
+            <div class="index-card">
+                <div class="index-name">台股加權</div>
+                <div class="index-price">46,551.13 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #3fb950">
+                    +386.43 (+0.84%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">台指期夜盤</div>
+                <div class="index-price">46,704.00 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #3fb950">
+                    +885.00 (+1.93%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">台股櫃買</div>
+                <div class="index-price">269.45 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #3fb950">
+                    +1.73 (+0.65%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">S&P 500</div>
+                <div class="index-price">7,735.88 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -11.83 (-0.15%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">那斯達克</div>
+                <div class="index-price">26,576.79 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -7.27 (-0.03%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">道瓊工業</div>
+                <div class="index-price">53,538.74 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -147.37 (-0.27%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">費城半導體</div>
+                <div class="index-price">11,496.47 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #3fb950">
+                    +144.34 (+1.27%)
+                </div>
+            </div>
+        </div>
+        <div class="section-header">
+            <span class="section-title">貨幣與資產</span>
+        </div>
+        <div class="index-grid">
+            
+            <div class="index-card">
+                <div class="index-name">美元兌台幣</div>
+                <div class="index-price">31.61 <span class="unit">元</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -0.10 (-0.32%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">日圓兌台幣</div>
+                <div class="index-price">0.20 <span class="unit">元</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -0.00 (-0.20%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">比特幣</div>
+                <div class="index-price">79,399.22 <span class="unit">USD</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -1,872.70 (-2.30%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">以太坊</div>
+                <div class="index-price">2,453.20 <span class="unit">USD</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -54.50 (-2.17%)
+                </div>
+            </div>
+        </div>
+        <div class="section-header">
+            <span class="section-title">關鍵商品</span>
+        </div>
+        <div class="index-grid">
+            
+            <div class="index-card">
+                <div class="index-name">WTI 原油</div>
+                <div class="index-price">90.22 <span class="unit">USD/桶</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -1.08 (-1.18%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">布蘭特原油</div>
+                <div class="index-price">94.47 <span class="unit">USD/桶</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -1.05 (-1.10%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">黃金</div>
+                <div class="index-price">4,444.20 <span class="unit">USD/盎司</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -95.70 (-2.11%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">白銀</div>
+                <div class="index-price">65.93 <span class="unit">USD/盎司</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -1.77 (-2.62%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">高階銅</div>
+                <div class="index-price">6.66 <span class="unit">USD/磅</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -0.01 (-0.10%)
+                </div>
+            </div>
+        </div>
+        <div class="section-header">
+            <span class="section-title">利率與流動性</span>
+        </div>
+        <div class="index-grid">
+            
+            <div class="index-card">
+                <div class="index-name">10Y. 美債</div>
+                <div class="index-price">4.78 <span class="unit">%</span></div>
+                <div class="index-change" style="color: #3fb950">
+                    +0.02 (+0.46%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">5Y. 美債</div>
+                <div class="index-price">4.55 <span class="unit">%</span></div>
+                <div class="index-change" style="color: #3fb950">
+                    +0.04 (+0.95%)
+                </div>
+            </div>
+        </div>
+        <div class="section-header">
+            <span class="section-title">風險與情緒指標</span>
+        </div>
+        <div class="index-grid">
+            
+            <div class="index-card">
+                <div class="index-name">VIX 恐慌指數</div>
+                <div class="index-price">14.14 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #f85149">
+                    -0.18 (-1.26%)
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">美元指數</div>
+                <div class="index-price">99.17 <span class="unit">點</span></div>
+                <div class="index-change" style="color: #3fb950">
+                    +0.26 (+0.27%)
+                </div>
+            </div>
+        </div>
+
+        <div class="section-header">
+            <span class="section-title">族群分析報告</span>
+        </div>
+        <div class="report-grid">
+            
+        <a href="AI與半導體_20260904.html" class="card">
+            <div class="card-icon">📊</div>
+            <div class="card-title">AI與半導體</div>
+            <div class="card-date">2026-09-04</div>
+        </a>
+        <a href="ETF_20260904.html" class="card">
+            <div class="card-icon">📊</div>
+            <div class="card-title">ETF</div>
+            <div class="card-date">2026-09-04</div>
+        </a>
+        <a href="Leveraged_ETF_20260904.html" class="card">
+            <div class="card-icon">📊</div>
+            <div class="card-title">Leveraged ETF</div>
+            <div class="card-date">2026-09-04</div>
+        </a>
+        <a href="記憶體_20260904.html" class="card">
+            <div class="card-icon">📊</div>
+            <div class="card-title">記憶體</div>
+            <div class="card-date">2026-09-04</div>
+        </a>
+        </div>
+        
+    </main>
+    <footer>
+        ⚠️ 本報告為量化模型輸出，僅供 AI 輔助分析參考，不構成投資建議。<br>
+        Data provided by Yahoo Finance & FinMind API
+    </footer>
+</body>
+</html>
