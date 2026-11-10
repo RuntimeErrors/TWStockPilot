@@ -44,6 +44,7 @@ jobs:
           python main.py
 
       - name: Run Industry Group Analysis
+        if: false   # 暫停執行，需要時移除此行即可重新啟用
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -60,7 +61,7 @@ jobs:
 
 
       - name: Upload Industry Reports
-        if: always()
+        if: false   # 暫停執行，需要時改回 if: always() 即可重新啟用
         uses: actions/upload-artifact@v4
         with:
           name: industry-reports-${{ github.run_number }}
